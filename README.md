@@ -1,10 +1,10 @@
-# DataFrame.SymbolicRegression
+# SymbolicRegression
 
 A Haskell library (based on [eggp](https://github.com/folivetti/eggp) which is in turn based on [srtree](https://github.com/folivetti/srtree)) for symbolic regression on DataFrames. Automatically discover mathematical expressions that best fit your data using genetic programming with e-graph optimization.
 
 ## Overview
 
-DataFrame.SymbolicRegression integrates symbolic regression capabilities into a DataFrame workflow. Given a target column and a dataset, it evolves mathematical expressions that predict the target variable, returning a Pareto front of expressions trading off complexity and accuracy.
+SymbolicRegression integrates symbolic regression capabilities into a DataFrame workflow. Given a target column and a dataset, it evolves mathematical expressions that predict the target variable, returning a Pareto front of expressions trading off complexity and accuracy.
 
 ## Quick Start
 
@@ -96,7 +96,7 @@ exprs <- fitSymbolicRegression myConfig targetColumn df
 ## Dependencies
 
 ### System dependencies
-To install DataFrame.SymbolicRegression you'll need:
+To install SymbolicRegression you'll need:
 * libz: `sudo apt install libz-dev`
 * libnlopt: `sudo apt install libnlopt-dev`
 * libgmp: `sudo apt install libgmp-dev`

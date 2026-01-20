@@ -15,21 +15,6 @@ ghci> import Symbolic.Regression
 
 -- Load your data
 ghci> df <- D.readParquet "./data/mtcars.parquet"
-ghci> :set -XTemplateHaskell
-ghci> import Data.Int
-ghci> _ = (); F.declareColumns df
-model :: Expr Text
-mpg :: Expr Double
-cyl :: Expr Int32
-disp :: Expr Double
-hp :: Expr Int32
-drat :: Expr Double
-wt :: Expr Double
-qsec :: Expr Double
-vs :: Expr Int32
-am :: Expr Int32
-gear :: Expr Int32
-carb :: Expr Int32
 
 -- Run symbolic regression to predict 'mpg'
 -- NOTE: ALL COLUMNS MUST BE CONVERTED TO DOUBLE FIRST

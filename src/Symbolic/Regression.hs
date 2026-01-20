@@ -3,7 +3,54 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-module Symbolic.Regression where
+{- |
+Module      : Symbolic.Regression
+Description : Symbolic regression for DataFrames using genetic programming with e-graph optimization
+
+This module provides symbolic regression capabilities for DataFrame workflows.
+Given a target column and a dataset, it evolves mathematical expressions that
+predict the target variable, returning a Pareto front of expressions trading
+off complexity and accuracy.
+
+= Quick Start
+
+@
+import qualified DataFrame as D
+import DataFrame.Functions ((.=))
+import Symbolic.Regression
+
+-- Load your data
+df <- D.readParquet "./data/mtcars.parquet"
+
+-- Run symbolic regression to predict 'mpg'
+exprs <- fit defaultRegressionConfig mpg df
+
+-- Use the best expression
+D.derive "prediction" (last exprs) df
+@
+
+= Important Notes
+
+All columns used in regression must be converted to 'Double' first.
+Symbolic regression will by default only use the double columns.
+
+= How It Works
+
+1. __Genetic Programming__: Evolves a population of expression trees through
+   selection, crossover, and mutation
+2. __E-graph Optimization__: Uses equality saturation to discover equivalent
+   expressions and simplify
+3. __Parameter Optimization__: Fits numerical constants using nonlinear optimization
+4. __Pareto Selection__: Returns expressions across the complexity-accuracy frontier
+-}
+module Symbolic.Regression (
+    -- * Main API
+    fit,
+
+    -- * Configuration
+    RegressionConfig (..),
+    defaultRegressionConfig,
+) where
 
 import Control.Exception (throw)
 import Control.Monad.State.Strict
@@ -60,28 +107,74 @@ import Algorithm.EqSat.SearchSR
 import Data.Time.Clock.POSIX
 import Text.ParseSR
 
+{- | Configuration for the symbolic regression algorithm.
+
+Use 'defaultRegressionConfig' as a starting point and modify fields as needed:
+
+@
+myConfig :: RegressionConfig
+myConfig = defaultRegressionConfig
+    { generations = 200
+    , maxExpressionSize = 7
+    , populationSize = 200
+    }
+@
+-}
 data RegressionConfig = RegressionConfig
     { generations :: Int
+    -- ^ Number of evolutionary generations to run (default: 100)
     , maxExpressionSize :: Int
+    -- ^ Maximum tree depth\/complexity for generated expressions (default: 5)
     , numFolds :: Int
+    -- ^ Number of cross-validation folds (default: 3)
     , showTrace :: Bool
+    -- ^ Whether to print progress during evolution (default: 'True')
     , lossFunction :: Distribution
+    -- ^ Loss function to optimize: 'MSE', 'Gaussian', 'Poisson', etc. (default: 'MSE')
     , numOptimisationIterations :: Int
+    -- ^ Number of iterations for parameter optimization (default: 30)
     , numParameterRetries :: Int
+    -- ^ Number of retries for parameter fitting (default: 2)
     , populationSize :: Int
+    -- ^ Size of the expression population (default: 100)
     , tournamentSize :: Int
+    -- ^ Number of individuals in tournament selection (default: 3)
     , crossoverProbability :: Double
+    -- ^ Probability of crossover between expressions (default: 0.95)
     , mutationProbability :: Double
+    -- ^ Probability of mutation (default: 0.3)
     , unaryFunctions :: [D.Expr Double -> D.Expr Double]
+    -- ^ Unary operations to include in the search space (default: @[]@)
     , binaryFunctions :: [D.Expr Double -> D.Expr Double -> D.Expr Double]
-    , numParams :: Int -- -1 for auto
+    {- ^ Binary operations to include in the search space
+    (default: @[(+), (-), (*), (\/)]@)
+    -}
+    , numParams :: Int
+    -- ^ Number of parameters to use. Set to @-1@ for automatic detection (default: -1)
     , generational :: Bool
+    -- ^ Whether to use generational replacement strategy (default: 'False')
     , simplifyExpressions :: Bool
-    , maxTime :: Int -- -1 for no limit
+    -- ^ Whether to simplify output expressions using e-graph optimization (default: 'True')
+    , maxTime :: Int
+    -- ^ Time limit in seconds. Set to @-1@ for no limit (default: -1)
     , dumpTo :: String
+    -- ^ File path to save e-graph state for later resumption (default: @\"\"@)
     , loadFrom :: String
+    -- ^ File path to load e-graph state from a previous run (default: @\"\"@)
     }
 
+{- | Default configuration for symbolic regression.
+
+Provides sensible defaults for most use cases:
+
+* 100 generations with population size 100
+* Maximum expression size of 5
+* 3-fold cross-validation
+* MSE loss function
+* Basic arithmetic operations: @+@, @-@, @*@, @\/@
+
+Modify specific fields to customize the search behavior.
+-}
 defaultRegressionConfig :: RegressionConfig
 defaultRegressionConfig =
     RegressionConfig
@@ -106,8 +199,42 @@ defaultRegressionConfig =
         , loadFrom = ""
         }
 
+{- | Run symbolic regression to discover mathematical expressions that fit the data.
+
+Returns a list of expressions representing the Pareto front, ordered by
+complexity (simplest first). Each expression:
+
+* Is a valid @'D.Expr' 'Double'@ that can be used with DataFrame operations
+* Represents a different trade-off between simplicity and accuracy
+* Has optimized numerical constants
+
+= Example
+
+@
+exprs <- fit defaultRegressionConfig targetColumn df
+
+-- View discovered expressions
+map D.prettyPrint exprs
+-- [\"qsec\", \"57.33 \/ wt\", \"10.75 + (1557.67 \/ disp)\"]
+
+-- Use expressions in DataFrame operations
+D.derive \"prediction\" (last exprs) df
+@
+
+= Important
+
+All columns must be converted to 'Double' before running regression.
+The algorithm will only use double-typed columns as features.
+-}
 fit ::
-    RegressionConfig -> D.Expr Double -> D.DataFrame -> IO [D.Expr Double]
+    -- | Configuration controlling the search algorithm
+    RegressionConfig ->
+    -- | Target column expression to predict
+    D.Expr Double ->
+    -- | Input DataFrame containing features and target
+    D.DataFrame ->
+    -- | Pareto front of expressions, ordered simplest to most complex
+    IO [D.Expr Double]
 fit cfg targetColumn df = do
     g <- getStdGen
     let

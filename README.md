@@ -1,40 +1,57 @@
-# SymbolicRegression
+# symbolic-regression
 
 A Haskell library (based on [eggp](https://github.com/folivetti/eggp) which is in turn based on [srtree](https://github.com/folivetti/srtree)) for symbolic regression on DataFrames. Automatically discover mathematical expressions that best fit your data using genetic programming with e-graph optimization.
 
 ## Overview
 
-SymbolicRegression integrates symbolic regression capabilities into a DataFrame workflow. Given a target column and a dataset, it evolves mathematical expressions that predict the target variable, returning a Pareto front of expressions trading off complexity and accuracy.
+symbolic-regression integrates symbolic regression capabilities into a DataFrame workflow. Given a target column and a dataset, it evolves mathematical expressions that predict the target variable, returning a Pareto front of expressions trading off complexity and accuracy.
 
 ## Quick Start
 
 ```haskell
-import qualified DataFrame as D
-import DataFrame.Functions ((.=))
-import SymbolicRegression
+ghci> import qualified DataFrame as D
+ghci> import DataFrame.Functions ((.=))
+ghci> import Symbolic.Regression
 
 -- Load your data
-df <- D.readParquet "data/mtcars.parquet"
+ghci> df <- D.readParquet "./data/mtcars.parquet"
+ghci> :set -XTemplateHaskell
+ghci> import Data.Int
+ghci> _ = (); F.declareColumns df
+model :: Expr Text
+mpg :: Expr Double
+cyl :: Expr Int32
+disp :: Expr Double
+hp :: Expr Int32
+drat :: Expr Double
+wt :: Expr Double
+qsec :: Expr Double
+vs :: Expr Int32
+am :: Expr Int32
+gear :: Expr Int32
+carb :: Expr Int32
 
 -- Run symbolic regression to predict 'mpg'
 -- NOTE: ALL COLUMNS MUST BE CONVERTED TO DOUBLE FIRST
 -- e.g df' = D.derive "some_column" (F.toDouble (F.col @Int "some_column")) df
-exprs <- fitSymbolicRegression defaultRegressionConfig mpg df
+-- Symbolic regression will by default only use the double columns
+-- otherwise.
+ghci> exprs <- fit defaultRegressionConfig mpg df
 
 -- View discovered expressions (Pareto front from simplest to most complex)
-map D.prettyPrint exprs
+ghci> map D.prettyPrint exprs
 -- [ qsec,
 -- , 57.33 / wt
 -- , 10.75 + (1557.67 / disp)]
 
 -- Create named expressions that we'll use in a dataframe.
-levels = zipWith (.=) ["level_1", "level_2", "level_3"] exprs
+ghci> levels = zipWith (.=) ["level_1", "level_2", "level_3"] exprs
 
 -- Show the various predictions in our dataframe.
-D.deriveMany levels df
+ghci> D.deriveMany levels df
 
 -- Or pick the best one
-D.derive "prediction" (last exprs) df
+ghci> D.derive "prediction" (last exprs) df
 ```
 
 ## Configuration
@@ -75,12 +92,12 @@ myConfig = defaultRegressionConfig
     , populationSize = 200
     }
 
-exprs <- fitSymbolicRegression myConfig targetColumn df
+exprs <- fit myConfig targetColumn df
 ```
 
 ## Output
 
-`fitSymbolicRegression` returns a list of expressions representing the Pareto front, ordered by complexity (simplest first). Each expression:
+`fit` returns a list of expressions representing the Pareto front, ordered by complexity (simplest first). Each expression:
 
 - Is a valid `Expr Double` that can be used with DataFrame operations
 - Represents a different trade-off between simplicity and accuracy
@@ -96,7 +113,7 @@ exprs <- fitSymbolicRegression myConfig targetColumn df
 ## Dependencies
 
 ### System dependencies
-To install SymbolicRegression you'll need:
+To install symbolic-regression you'll need:
 * libz: `sudo apt install libz-dev`
 * libnlopt: `sudo apt install libnlopt-dev`
 * libgmp: `sudo apt install libgmp-dev`

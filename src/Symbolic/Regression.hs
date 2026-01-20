@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
-module SymbolicRegression where
+module Symbolic.Regression where
 
 import Control.Exception (throw)
 import Control.Monad.State.Strict
@@ -106,9 +106,9 @@ defaultRegressionConfig =
         , loadFrom = ""
         }
 
-fitSymbolicRegression ::
+fit ::
     RegressionConfig -> D.Expr Double -> D.DataFrame -> IO [D.Expr Double]
-fitSymbolicRegression cfg targetColumn df = do
+fit cfg targetColumn df = do
     g <- getStdGen
     let
         df' =

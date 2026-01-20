@@ -22,10 +22,10 @@ df <- D.readParquet "data/mtcars.parquet"
 exprs <- fitSymbolicRegression defaultRegressionConfig mpg df
 
 -- View discovered expressions (Pareto front from simplest to most complex)
-exprs
--- [(col @Double "qsec"),
---  (divide (lit 57.33) (col @Double "wt")),
---  (add (lit 10.75) (divide (lit 1557.67) (col @Double "disp")))]
+map D.prettyPrint exprs
+-- [ qsec,
+-- , 57.33 / wt
+-- , 10.75 + (1557.67 / disp)]
 
 -- Create named expressions that we'll use in a dataframe.
 levels = zipWith (.=) ["level_1", "level_2", "level_3"] exprs

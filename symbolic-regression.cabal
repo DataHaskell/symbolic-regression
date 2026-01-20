@@ -11,6 +11,7 @@ build-type:         Simple
 homepage:           https://github.com/DataHaskell/symbolic-regression
 bug-reports:        https://github.com/DataHaskell/symbolic-regression/issues
 extra-doc-files:    CHANGELOG.md README.md
+extra-source-files: cabal.project
 
 common warnings
     ghc-options: -Wall

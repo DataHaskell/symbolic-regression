@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               symbolic-regression
-version:            0.1.0.0
+version:            0.1.0.1
 synopsis:           Symbolic Regression in Haskell
 license:            MIT
 license-file:       LICENSE
@@ -8,6 +8,8 @@ author:             DataHaskell
 maintainer:         mschavinda@gmail.com
 category:           Data
 build-type:         Simple
+homepage:           https://github.com/DataHaskell/symbolic-regression
+bug-reports:        https://github.com/DataHaskell/symbolic-regression/issues
 extra-doc-files:    CHANGELOG.md README.md
 
 common warnings
@@ -36,7 +38,7 @@ library
                     , random >=1.2 && <1.4
                     , scheduler >=2.0.0.1 && <3
                     , split >=0.2.5 && <0.3
-                    , srtree >= 2.0.1.5
+                    , srtree >= 2.0.1.5 && < 3
                     , statistics >=0.16.2.1 && <0.17
                     , transformers >=0.6.1.0 && <0.7
                     , unliftio >=0.2.10 && <1

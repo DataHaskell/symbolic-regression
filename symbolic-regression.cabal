@@ -4,11 +4,11 @@ version:            0.1.0.0
 synopsis:           Symbolic Regression in Haskell
 license:            MIT
 license-file:       LICENSE
-author:             Michael Chavinda
+author:             DataHaskell
 maintainer:         mschavinda@gmail.com
 category:           Data
 build-type:         Simple
-extra-doc-files:    CHANGELOG.md
+extra-doc-files:    CHANGELOG.md README.md
 
 common warnings
     ghc-options: -Wall

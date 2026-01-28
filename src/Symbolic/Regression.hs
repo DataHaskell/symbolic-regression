@@ -105,7 +105,7 @@ import qualified Data.SRTree.Internal as SI
 import Data.SRTree.Print
 import Data.SRTree.Random
 import Data.Type.Equality (TestEquality (testEquality), type (:~:) (Refl))
-import Type.Reflection (Typeable, typeOf, typeRep)
+import Type.Reflection (typeRep)
 
 import Algorithm.EqSat (runEqSat)
 import Algorithm.EqSat.SearchSR

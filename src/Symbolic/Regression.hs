@@ -1,6 +1,9 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
 {- |
@@ -101,6 +104,8 @@ import Data.SRTree.Datasets
 import qualified Data.SRTree.Internal as SI
 import Data.SRTree.Print
 import Data.SRTree.Random
+import Data.Type.Equality (TestEquality (testEquality), type (:~:) (Refl))
+import Type.Reflection (Typeable, typeOf, typeRep)
 
 import Algorithm.EqSat (runEqSat)
 import Algorithm.EqSat.SearchSR
@@ -189,7 +194,7 @@ defaultRegressionConfig =
         , tournamentSize = 3
         , crossoverProbability = 0.95
         , mutationProbability = 0.3
-        , unaryFunctions = []
+        , unaryFunctions = [(`F.pow` 2), (`F.pow` 3), log, (1 /)]
         , binaryFunctions = [(+), (-), (*), (/)]
         , numParams = -1
         , generational = False
@@ -274,6 +279,12 @@ fit cfg targetColumn df = do
 toExpr :: D.DataFrame -> Fix SRTree -> Expr Double
 toExpr _ (Fix (Const value)) = Lit value
 toExpr df (Fix (Var ix)) = Col (D.columnNames df !! ix)
+toExpr df (Fix (Uni f value)) = case f of
+    SI.Square -> F.pow (toExpr df value) 2
+    SI.Cube -> F.pow (toExpr df value) 3
+    SI.Log -> log (toExpr df value)
+    SI.Recip -> F.lit 1 / toExpr df value
+    treeOp -> error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
 toExpr df (Fix (Bin op left right)) = case op of
     SI.Add -> toExpr df left + toExpr df right
     SI.Sub -> toExpr df left - toExpr df right
@@ -286,7 +297,19 @@ toNonTerminal :: D.Expr Double -> String
 toNonTerminal (BinaryOp "add" _ _ _) = "add"
 toNonTerminal (BinaryOp "sub" _ _ _) = "sub"
 toNonTerminal (BinaryOp "mult" _ _ _) = "mul"
+toNonTerminal (BinaryOp "divide" _ (Lit n :: Expr b) _) = case testEquality (typeRep @b) (typeRep @Double) of
+    Nothing -> error "[Internal Error] - Reciprocal of non-double"
+    Just Refl -> case n of
+        1 -> "recip"
+        _ -> error "Unknown reciprocal"
 toNonTerminal (BinaryOp "divide" _ _ _) = "div"
+toNonTerminal (BinaryOp "pow" _ _ (e :: Expr b)) = case testEquality (typeRep @b) (typeRep @Int) of
+    Nothing -> error "Impossible: Raised to non-int power"
+    Just Refl -> case e of
+        (Lit 2) -> "square"
+        (Lit 3) -> "cube"
+        _ -> error "Unknown power"
+toNonTerminal (UnaryOp "log" _ _) = "log"
 toNonTerminal e = error ("Unsupported operation: " ++ show e)
 
 egraphGP ::

@@ -1,6 +1,6 @@
 cabal-version:      3.0
 name:               symbolic-regression
-version:            0.1.0.1
+version:            0.1.0.2
 synopsis:           Symbolic Regression in Haskell
 description:        Automatically discover mathematical expressions that best fit your data using genetic programming with e-graph optimization.
 license:            MIT
@@ -40,7 +40,7 @@ library
                     , random >=1.2 && <1.4
                     , scheduler >=2.0.0.1 && <3
                     , split >=0.2.5 && <0.3
-                    , srtree >= 2.0.1.5 && < 3
+                    , srtree >= 2.0.1.6 && < 3
                     , statistics >=0.16.2.1 && <0.17
                     , transformers >=0.6.1.0 && <0.7
                     , unliftio >=0.2.10 && <1

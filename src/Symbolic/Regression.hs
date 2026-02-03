@@ -130,8 +130,8 @@ data RegressionConfig = RegressionConfig
     -- ^ Number of evolutionary generations to run (default: 100)
     , maxExpressionSize :: Int
     -- ^ Maximum tree depth\/complexity for generated expressions (default: 5)
-    , numFolds :: Int
-    -- ^ Number of cross-validation folds (default: 3)
+    , validationConfig :: Maybe ValidationConfig
+    -- ^ The configuration for cross validation.
     , showTrace :: Bool
     -- ^ Whether to print progress during evolution (default: 'True')
     , lossFunction :: Distribution
@@ -168,6 +168,11 @@ data RegressionConfig = RegressionConfig
     -- ^ File path to load e-graph state from a previous run (default: @\"\"@)
     }
 
+data ValidationConfig = ValidationConfig
+    { validationPercent :: Double
+    , validationSeed :: Int
+    }
+
 {- | Default configuration for symbolic regression.
 
 Provides sensible defaults for most use cases:
@@ -185,7 +190,7 @@ defaultRegressionConfig =
     RegressionConfig
         { generations = 100
         , maxExpressionSize = 5
-        , numFolds = 3
+        , validationConfig = Nothing
         , showTrace = True
         , lossFunction = MSE
         , numOptimisationIterations = 30
@@ -243,13 +248,18 @@ fit ::
 fit cfg targetColumn df = do
     g <- getStdGen
     let
-        df' =
-            D.exclude
-                [F.name targetColumn]
-                (D.selectBy [D.byProperty (D.hasElemType @Double)] df)
-        matrix = either throw id (D.toDoubleMatrix df')
-        features = fromLists' Seq (V.toList (V.map VU.toList matrix)) :: Array S Ix2 Double
-        target' = fromLists' Seq (D.columnAsList targetColumn df) :: Array S Ix1 Double
+        (train, validation) = case (validationConfig cfg) of
+            Nothing -> (df, df)
+            Just vcfg -> D.randomSplit (mkStdGen (validationSeed vcfg)) (1 - (validationPercent vcfg)) df
+        cols = D.columnNames (D.exclude [F.name targetColumn] (D.selectBy [D.byProperty (D.hasElemType @Double)] train))
+        toFeatureMatrix d =
+            either throw id $
+                D.toDoubleMatrix $
+                    D.exclude
+                        [F.name targetColumn]
+                        (D.selectBy [D.byProperty (D.hasElemType @Double)] d)
+        toFeatures d = fromLists' Seq (V.toList (V.map VU.toList (toFeatureMatrix d))) :: Array S Ix2 Double
+        toTarget d = fromLists' Seq (D.columnAsList targetColumn d) :: Array S Ix1 Double
         nonterminals =
             intercalate
                 ","
@@ -262,7 +272,7 @@ fit cfg targetColumn df = do
                 ","
                 ( Prelude.map
                     T.unpack
-                    (Prelude.filter (/= F.name targetColumn) (D.columnNames df))
+                    cols
                 )
         alg =
             evalStateT
@@ -270,26 +280,26 @@ fit cfg targetColumn df = do
                     cfg
                     nonterminals
                     varnames
-                    [((features, target', Nothing), (features, target', Nothing))]
-                    [(features, target', Nothing)]
+                    [((toFeatures train, toTarget train, Nothing), (toFeatures validation, toTarget validation, Nothing))]
+                    [(toFeatures df, toTarget df, Nothing)]
                 )
                 emptyGraph
-    fmap (Prelude.map (toExpr df')) (evalStateT alg g)
+    fmap (Prelude.map (toExpr cols)) (evalStateT alg g)
 
-toExpr :: D.DataFrame -> Fix SRTree -> Expr Double
+toExpr :: [T.Text] -> Fix SRTree -> Expr Double
 toExpr _ (Fix (Const value)) = Lit value
-toExpr df (Fix (Var ix)) = Col (D.columnNames df !! ix)
-toExpr df (Fix (Uni f value)) = case f of
-    SI.Square -> F.pow (toExpr df value) 2
-    SI.Cube -> F.pow (toExpr df value) 3
-    SI.Log -> log (toExpr df value)
-    SI.Recip -> F.lit 1 / toExpr df value
+toExpr cols (Fix (Var ix)) = Col (cols !! ix)
+toExpr cols (Fix (Uni f value)) = case f of
+    SI.Square -> F.pow (toExpr cols value) 2
+    SI.Cube -> F.pow (toExpr cols value) 3
+    SI.Log -> log (toExpr cols value)
+    SI.Recip -> F.lit 1 / toExpr cols value
     treeOp -> error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
-toExpr df (Fix (Bin op left right)) = case op of
-    SI.Add -> toExpr df left + toExpr df right
-    SI.Sub -> toExpr df left - toExpr df right
-    SI.Mul -> toExpr df left * toExpr df right
-    SI.Div -> toExpr df left / toExpr df right
+toExpr cols (Fix (Bin op left right)) = case op of
+    SI.Add -> toExpr cols left + toExpr cols right
+    SI.Sub -> toExpr cols left - toExpr cols right
+    SI.Mul -> toExpr cols left * toExpr cols right
+    SI.Div -> toExpr cols left / toExpr cols right
     treeOp -> error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
 toExpr _ _ = error "UNIMPLEMENTED"
 

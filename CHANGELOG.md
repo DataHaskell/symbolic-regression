@@ -1,5 +1,8 @@
 # Revision history for symbolic-regression
 
+## 0.2.0.1
+* Export ValidationConfig
+
 ## 0.2.0.0
 * Fix variable name mapping when translating back to dataframe.
 * Add validation config that specifies seed and validation percentage.

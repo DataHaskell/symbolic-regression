@@ -52,6 +52,7 @@ module Symbolic.Regression (
 
     -- * Configuration
     RegressionConfig (..),
+    ValidationConfig (..),
     defaultRegressionConfig,
 ) where
 

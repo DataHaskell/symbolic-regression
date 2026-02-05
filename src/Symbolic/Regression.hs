@@ -249,17 +249,25 @@ fit ::
 fit cfg targetColumn df = do
     g <- getStdGen
     let
-        (train, validation) = case (validationConfig cfg) of
+        (train, validation) = case validationConfig cfg of
             Nothing -> (df, df)
-            Just vcfg -> D.randomSplit (mkStdGen (validationSeed vcfg)) (1 - (validationPercent vcfg)) df
-        cols = D.columnNames (D.exclude [F.name targetColumn] (D.selectBy [D.byProperty (D.hasElemType @Double)] train))
+            Just vcfg ->
+                D.randomSplit (mkStdGen (validationSeed vcfg)) (1 - validationPercent vcfg) df
+        cols =
+            D.columnNames
+                ( D.exclude
+                    [F.name targetColumn]
+                    (D.selectBy [D.byProperty (D.hasElemType @Double)] train)
+                )
         toFeatureMatrix d =
             either throw id $
                 D.toDoubleMatrix $
                     D.exclude
                         [F.name targetColumn]
                         (D.selectBy [D.byProperty (D.hasElemType @Double)] d)
-        toFeatures d = fromLists' Seq (V.toList (V.map VU.toList (toFeatureMatrix d))) :: Array S Ix2 Double
+        toFeatures d =
+            fromLists' Seq (V.toList (V.map VU.toList (toFeatureMatrix d))) ::
+                Array S Ix2 Double
         toTarget d = fromLists' Seq (D.columnAsList targetColumn d) :: Array S Ix1 Double
         nonterminals =
             intercalate
@@ -267,6 +275,7 @@ fit cfg targetColumn df = do
                 ( Prelude.map
                     (toNonTerminal . (\f -> f (F.col "fake1") (F.col "fake2")))
                     (binaryFunctions cfg)
+                    ++ Prelude.map (toNonTerminal . (\f -> f (F.col "fake1"))) (unaryFunctions cfg)
                 )
         varnames =
             intercalate
@@ -281,7 +290,11 @@ fit cfg targetColumn df = do
                     cfg
                     nonterminals
                     varnames
-                    [((toFeatures train, toTarget train, Nothing), (toFeatures validation, toTarget validation, Nothing))]
+                    [
+                        ( (toFeatures train, toTarget train, Nothing)
+                        , (toFeatures validation, toTarget validation, Nothing)
+                        )
+                    ]
                     [(toFeatures df, toTarget df, Nothing)]
                 )
                 emptyGraph

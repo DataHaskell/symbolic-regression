@@ -14,7 +14,6 @@ example_predictMPG = do
     -- Define mpg as a column reference
     let mpg = F.col "mpg"
 
-    let config = defaultRegressionConfig{maxExpressionSize = 7}
     exprs <- fit defaultRegressionConfig mpg df
 
     -- Print each expression

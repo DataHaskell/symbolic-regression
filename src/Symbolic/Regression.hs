@@ -105,8 +105,6 @@ import Data.SRTree.Datasets
 import qualified Data.SRTree.Internal as SI
 import Data.SRTree.Print
 import Data.SRTree.Random
-import Data.Type.Equality (TestEquality (testEquality), type (:~:) (Refl))
-import Type.Reflection (typeRep)
 
 import Algorithm.EqSat (runEqSat)
 import Algorithm.EqSat.SearchSR
@@ -377,25 +375,6 @@ toExpr cols (Fix (Bin op left right)) = case op of
     SI.Div -> toExpr cols left / toExpr cols right
     treeOp -> error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
 toExpr _ _ = error "UNIMPLEMENTED"
-
-toNonTerminal :: D.Expr Double -> String
-toNonTerminal (BinaryOp "add" _ _ _) = "add"
-toNonTerminal (BinaryOp "sub" _ _ _) = "sub"
-toNonTerminal (BinaryOp "mult" _ _ _) = "mul"
-toNonTerminal (BinaryOp "divide" _ (Lit n :: Expr b) _) = case testEquality (typeRep @b) (typeRep @Double) of
-    Nothing -> error "[Internal Error] - Reciprocal of non-double"
-    Just Refl -> case n of
-        1 -> "recip"
-        _ -> error "Unknown reciprocal"
-toNonTerminal (BinaryOp "divide" _ _ _) = "div"
-toNonTerminal (BinaryOp "pow" _ _ (e :: Expr b)) = case testEquality (typeRep @b) (typeRep @Int) of
-    Nothing -> error "Impossible: Raised to non-int power"
-    Just Refl -> case e of
-        (Lit 2) -> "square"
-        (Lit 3) -> "cube"
-        _ -> error "Unknown power"
-toNonTerminal (UnaryOp "log" _ _) = "log"
-toNonTerminal e = error ("Unsupported operation: " ++ show e)
 
 -- | Initialize the e-graph by loading from file (if specified) and inserting initial terms
 initializeEGraph ::

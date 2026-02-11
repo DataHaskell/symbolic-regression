@@ -136,8 +136,10 @@ UnaryFunc "square" (\\x -> x \`F.pow\` 2)
 UnaryFunc "log" log
 @
 -}
-data UnaryFunc where
-    UnaryFunc :: String -> (D.Expr Double -> D.Expr Double) -> UnaryFunc
+data UnaryFunc = UnaryFunc String (D.Expr Double -> D.Expr Double)
+
+-- data UnaryFunc where
+--     UnaryFunc :: String -> (D.Expr Double -> D.Expr Double) -> UnaryFunc
 
 -- | Extract the name of a unary operation.
 getUnaryName :: UnaryFunc -> String
@@ -154,8 +156,7 @@ BinaryFunc "add" (+)
 BinaryFunc "mul" (*)
 @
 -}
-data BinaryFunc where
-    BinaryFunc :: String -> (D.Expr Double -> D.Expr Double -> D.Expr Double) -> BinaryFunc
+data BinaryFunc = BinaryFunc String (D.Expr Double -> D.Expr Double -> D.Expr Double)
 
 -- | Extract the name of a binary operation.
 getBinaryName :: BinaryFunc -> String

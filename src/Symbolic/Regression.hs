@@ -132,18 +132,29 @@ identity is preserved throughout the search process. The name is used to
 identify the operation in the internal representation.
 
 @
-UnaryFunc "square" (\\x -> x \`F.pow\` 2)
-UnaryFunc "log" log
+UnaryFunc USquare (\\x -> x \`F.pow\` 2)
+UnaryFunc ULog log
 @
 -}
-data UnaryFunc = UnaryFunc String (D.Expr Double -> D.Expr Double)
+data UnaryOpName
+    = ULog
+    | USquare
+    | UCube
+    | URecip
+    deriving (Eq)
 
--- data UnaryFunc where
---     UnaryFunc :: String -> (D.Expr Double -> D.Expr Double) -> UnaryFunc
+instance Show UnaryOpName where
+    show ULog = "log"
+    show USquare = "square"
+    show UCube = "cube"
+    show URecip = "recip"
+
+data UnaryFunc
+    = UnaryFunc UnaryOpName (D.Expr Double -> D.Expr Double)
 
 -- | Extract the name of a unary operation.
 getUnaryName :: UnaryFunc -> String
-getUnaryName (UnaryFunc name _) = name
+getUnaryName (UnaryFunc name _) = show name
 
 {- | Tagged binary operation for symbolic regression.
 
@@ -156,11 +167,27 @@ BinaryFunc "add" (+)
 BinaryFunc "mul" (*)
 @
 -}
-data BinaryFunc = BinaryFunc String (D.Expr Double -> D.Expr Double -> D.Expr Double)
+data BinaryOpName
+    = BAdd
+    | BSub
+    | BMul
+    | BDiv
+    | BPow
+    deriving (Eq)
+
+instance Show BinaryOpName where
+    show BAdd = "add"
+    show BSub = "sub"
+    show BMul = "mul"
+    show BDiv = "div"
+    show BPow = "pow"
+
+data BinaryFunc
+    = BinaryFunc BinaryOpName (D.Expr Double -> D.Expr Double -> D.Expr Double)
 
 -- | Extract the name of a binary operation.
 getBinaryName :: BinaryFunc -> String
-getBinaryName (BinaryFunc name _) = name
+getBinaryName (BinaryFunc name _) = show name
 
 {- | Configuration for the symbolic regression algorithm.
 
@@ -252,16 +279,16 @@ defaultRegressionConfig =
         , crossoverProbability = 0.95
         , mutationProbability = 0.3
         , unaryFunctions =
-            [ UnaryFunc "square" (\x -> x `F.pow` 2)
-            , UnaryFunc "cube" (\x -> x `F.pow` 3)
-            , UnaryFunc "log" log
-            , UnaryFunc "recip" (1 /)
+            [ UnaryFunc USquare (\x -> x `F.pow` 2)
+            , UnaryFunc UCube (\x -> x `F.pow` 3)
+            , UnaryFunc ULog log
+            , UnaryFunc URecip (1 /)
             ]
         , binaryFunctions =
-            [ BinaryFunc "add" (+)
-            , BinaryFunc "sub" (-)
-            , BinaryFunc "mul" (*)
-            , BinaryFunc "div" (/)
+            [ BinaryFunc BAdd (+)
+            , BinaryFunc BSub (-)
+            , BinaryFunc BMul (*)
+            , BinaryFunc BDiv (/)
             ]
         , numParams = -1
         , generational = False

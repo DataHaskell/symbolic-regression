@@ -113,6 +113,20 @@ import Algorithm.EqSat.SearchSR
 import Data.Time.Clock.POSIX
 import Text.ParseSR
 
+{- | Lift a random generator action into the e-graph monad.
+
+Wraps an action in the `Rng IO` monad (`StateT StdGen IO`) so it can be executed
+within the `StateT EGraph (StateT StdGen IO)` monad. The current random generator
+state is read from the inner `StateT StdGen`, updated after the action runs, and
+the result is returned in the e-graph monad.
+-}
+liftRng :: Rng IO a -> StateT EGraph (StateT StdGen IO) a
+liftRng rngAction = do
+    gen <- lift get -- get StdGen from inner StateT
+    (result, gen') <- liftIO $ runStateT rngAction gen
+    lift $ put gen' -- update StdGen
+    return result
+
 {- | Tagged unary operation for symbolic regression.
 
 Pairs an operation name with its implementation, ensuring the operation's
@@ -383,6 +397,49 @@ toNonTerminal (BinaryOp "pow" _ _ (e :: Expr b)) = case testEquality (typeRep @b
 toNonTerminal (UnaryOp "log" _ _) = "log"
 toNonTerminal e = error ("Unsupported operation: " ++ show e)
 
+-- | Initialize the e-graph by loading from file (if specified) and inserting initial terms
+initializeEGraph ::
+    RegressionConfig ->
+    (Fix SRTree -> RndEGraph (Double, [Array S Ix1 Double])) ->
+    RndEGraph EClassId ->
+    RndEGraph (SRTree ()) ->
+    RndEGraph [EClassId] ->
+    RndEGraph ()
+initializeEGraph cfg fitFun _rndTerm _rndNonTerm insertTerms = do
+    unless (null (loadFrom cfg)) $
+        io (BS.readFile (loadFrom cfg)) >>= \eg -> put (decode eg)
+    _ <- insertTerms
+    evaluateUnevaluated fitFun
+
+-- | Create the initial population of expressions
+createInitialPopulation ::
+    RegressionConfig ->
+    (Fix SRTree -> StateT EGraph (StateT StdGen IO) (Double, [Array S Ix1 Double])) ->
+    Rng IO (Fix SRTree) -> -- rndTerm
+    Rng IO (SRTree ()) -> -- rndNonTerm
+    (Int -> EClassId -> StateT EGraph (StateT StdGen IO) [String]) ->
+    StateT EGraph (StateT StdGen IO) ([EClassId], [[String]])
+createInitialPopulation cfg fitFun rndTerm rndNonTerm printExpr' = do
+    pop <- replicateM (populationSize cfg) $ do
+        ec <- insertRndExpr (maxExpressionSize cfg) rndTerm rndNonTerm >>= canonical
+        _ <- updateIfNothing fitFun ec
+        pure ec
+
+    pop' <- Prelude.mapM canonical pop
+
+    output <-
+        if showTrace cfg
+            then forM (Prelude.zip [0 ..] pop') $ uncurry printExpr'
+            else pure []
+
+    pure (pop', output)
+
+-- | Finalize by saving e-graph to file if specified
+finalizeEGraph :: RegressionConfig -> RndEGraph ()
+finalizeEGraph cfg =
+    unless (null (dumpTo cfg)) $
+        get >>= (io . BS.writeFile (dumpTo cfg) . encode)
+
 egraphGP ::
     RegressionConfig ->
     String -> -- nonterminals
@@ -391,57 +448,26 @@ egraphGP ::
     [DataSet] ->
     StateT EGraph (StateT StdGen IO) [Fix SRTree]
 egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
-    unless (null (loadFrom cfg)) $
-        io (BS.readFile (loadFrom cfg)) >>= \eg -> put (decode eg)
+    -- generate a random EClassId for the terminal expressions
+    -- rndTerm' :: RndEGraph EClassId
+    let rndTerm' = insertRndExpr (maxExpressionSize cfg) rndTerm rndNonTerm
 
-    _ <- insertTerms
-    evaluateUnevaluated fitFun
+    -- generate a random SRTree for non-terminal expressions
+    -- rndNonTerm' :: RndEGraph (SRTree ())
+    let rndNonTerm' = liftRng rndNonTerm
+
+    initializeEGraph cfg fitFun rndTerm' rndNonTerm' insertTerms
 
     t0 <- io getPOSIXTime
+    (pop', output) <- createInitialPopulation cfg fitFun rndTerm rndNonTerm printExpr'
 
-    pop <- replicateM (populationSize cfg) $ do
-        ec <- insertRndExpr (maxExpressionSize cfg) rndTerm rndNonTerm >>= canonical
-        _ <- updateIfNothing fitFun ec
-        pure ec
-    pop' <- Prelude.mapM canonical pop
+    let mTime = if maxTime cfg < 0 then Nothing else Just (fromIntegral $ maxTime cfg - 5)
+    _ <- runGenerations t0 mTime (pop', output, populationSize cfg)
 
-    output <-
-        if showTrace cfg
-            then forM (Prelude.zip [0 ..] pop') $ uncurry printExpr'
-            else pure []
-
-    let mTime =
-            if maxTime cfg < 0 then Nothing else Just (fromIntegral $ maxTime cfg - 5)
-    (_, _, _) <- iterateFor (generations cfg) t0 mTime (pop', output, populationSize cfg) $ \_ (ps', out, curIx) -> do
-        newPop' <- replicateM (populationSize cfg) (evolve ps')
-
-        out' <-
-            if showTrace cfg
-                then forM (Prelude.zip [curIx ..] newPop') $ uncurry printExpr'
-                else pure []
-
-        totSz <- gets (Map.size . _eNodeToEClass)
-        let full = totSz > max maxMem (populationSize cfg)
-        when full (cleanEGraph >> cleanDB)
-
-        newPop <-
-            if generational cfg
-                then Prelude.mapM canonical newPop'
-                else do
-                    pareto <-
-                        concat <$> forM [1 .. maxExpressionSize cfg] (`getTopFitEClassWithSize` 2)
-                    let remainder = populationSize cfg - length pareto
-                    lft <-
-                        if full
-                            then getTopFitEClassThat remainder (const True)
-                            else pure $ Prelude.take remainder newPop'
-                    Prelude.mapM canonical (pareto <> lft)
-        pure (newPop, out <> out', curIx + populationSize cfg)
-
-    unless (null (dumpTo cfg)) $
-        get >>= (io . BS.writeFile (dumpTo cfg) . encode)
+    finalizeEGraph cfg
     paretoFront' fitFun (maxExpressionSize cfg)
   where
+    -- Configuration and setup
     maxMem = 2000000
     fitFun =
         fitnessMV
@@ -473,6 +499,59 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
     isBin (Bin{}) = True
     isBin _ = False
 
+    -- Random generators
+    rndTerm = do
+        coin <- toss
+        if coin || numParams cfg == 0 then randomFrom terms else randomFrom params
+
+    rndNonTerm = randomFrom nonTerms
+
+    -- Main evolution loop
+    runGenerations t0 mTime initial =
+        iterateFor (generations cfg) t0 mTime initial generationStep
+      where
+        generationStep _ (ps', out, curIx) = do
+            newPop' <- replicateM (populationSize cfg) (evolve ps')
+
+            out' <-
+                if showTrace cfg
+                    then forM (Prelude.zip [curIx ..] newPop') $ uncurry printExpr'
+                    else pure []
+
+            totSz <- gets (Map.size . _eNodeToEClass)
+            let full = totSz > max maxMem (populationSize cfg)
+            when full (cleanEGraph >> cleanDB)
+
+            newPop <-
+                if generational cfg
+                    then Prelude.mapM canonical newPop'
+                    else selectNextPopulation full newPop'
+
+            pure (newPop, out <> out', curIx + populationSize cfg)
+
+        selectNextPopulation full newPop' = do
+            pareto <- concat <$> forM [1 .. maxExpressionSize cfg] (`getTopFitEClassWithSize` 2)
+            let remainder = populationSize cfg - length pareto
+            lft <-
+                if full
+                    then getTopFitEClassThat remainder (const True)
+                    else pure $ Prelude.take remainder newPop'
+            Prelude.mapM canonical (pareto <> lft)
+
+    iterateFor 0 _ _ xs _ = pure xs
+    iterateFor n t0' maxT xs f = do
+        xs' <- f n xs
+        t1 <- io getPOSIXTime
+        let delta = t1 - t0'
+            maxT' = subtract delta <$> maxT
+        case maxT' of
+            Nothing -> iterateFor (n - 1) t1 maxT' xs' f
+            Just mt ->
+                if mt <= 0
+                    then pure xs
+                    else iterateFor (n - 1) t1 maxT' xs' f
+
+    -- E-graph management
     cleanEGraph = do
         let nParetos = 10
         io . putStrLn $ "cleaning"
@@ -488,12 +567,6 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
                 Nothing -> pure ()
                 Just i'' -> insertFitness eId (fromJust $ _fitness i'') (_theta i'')
 
-    rndTerm = do
-        coin <- toss
-        if coin || numParams cfg == 0 then randomFrom terms else randomFrom params
-
-    rndNonTerm = randomFrom nonTerms
-
     refitChanged = do
         ids <-
             (gets (_refits . _eDB) >>= Prelude.mapM canonical . Set.toList)
@@ -504,19 +577,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
             (f, p) <- fitFun t
             insertFitness ec f p
 
-    iterateFor 0 _ _ xs _ = pure xs
-    iterateFor n t0' maxT xs f = do
-        xs' <- f n xs
-        t1 <- io getPOSIXTime
-        let delta = t1 - t0'
-            maxT' = subtract delta <$> maxT
-        case maxT' of
-            Nothing -> iterateFor (n - 1) t1 maxT' xs' f
-            Just mt ->
-                if mt <= 0
-                    then pure xs
-                    else iterateFor (n - 1) t1 maxT' xs' f
-
+    -- Evolution operators
     evolve xs' = do
         xs <- Prelude.mapM canonical xs'
         parents' <- tournament xs
@@ -541,6 +602,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
 
     combine (p1, p2) = crossover p1 p2 >>= mutate >>= canonical
 
+    -- Crossover operator
     crossover p1 p2 = do
         sz <- getSize p1
         coin <- rnd $ tossBiased (crossoverProbability cfg)
@@ -552,6 +614,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
                 tree <- getSubtree pos 0 Nothing [] cands p1
                 fromTree myCost (relabel tree) >>= canonical
 
+    -- Crossover and mutation helpers
     getSubtree ::
         Int ->
         Int ->
@@ -623,6 +686,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
             Uni _ t -> (p :) <$> getAllSubClasses t
             _ -> pure [p]
 
+    -- Mutation operator
     mutate p = do
         sz <- getSize p
         coin <- rnd $ tossBiased (mutationProbability cfg)
@@ -693,6 +757,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
                         r' <- getBestExpr r
                         pure . Fix $ Bin op l' r'
 
+    -- Output and reporting
     printExpr' :: Int -> EClassId -> RndEGraph [String]
     printExpr' ix ec' = do
         ec <- canonical ec'
@@ -766,8 +831,10 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
                     <> ","
                     <> vals
 
+    -- Initialization helpers
     insertTerms = forM terms (fromTree myCost >=> canonical)
 
+    -- Pareto front extraction
     paretoFront' _ maxSize' = go 1 (-(1.0 / 0.0))
       where
         go :: Int -> Double -> RndEGraph [Fix SRTree]

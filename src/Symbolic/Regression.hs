@@ -203,6 +203,8 @@ data RegressionConfig = RegressionConfig
     -- ^ File path to save e-graph state for later resumption (default: @\"\"@)
     , loadFrom :: String
     -- ^ File path to load e-graph state from a previous run (default: @\"\"@)
+    , seed :: Maybe Int
+    -- ^ Random seed for reproducibility. 'Nothing' uses system random (default: 'Nothing')
     }
 
 data ValidationConfig = ValidationConfig
@@ -254,6 +256,7 @@ defaultRegressionConfig =
         , maxTime = -1
         , dumpTo = ""
         , loadFrom = ""
+        , seed = Nothing
         }
 
 {- | Run symbolic regression to discover mathematical expressions that fit the data.
@@ -293,7 +296,9 @@ fit ::
     -- | Pareto front of expressions, ordered simplest to most complex
     IO [D.Expr Double]
 fit cfg targetColumn df = do
-    g <- getStdGen
+    g <- case seed cfg of
+        Just s -> pure $ mkStdGen s
+        Nothing -> getStdGen
     let
         (train, validation) = case validationConfig cfg of
             Nothing -> (df, df)

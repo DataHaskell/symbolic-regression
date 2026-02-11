@@ -113,6 +113,42 @@ import Algorithm.EqSat.SearchSR
 import Data.Time.Clock.POSIX
 import Text.ParseSR
 
+{- | Tagged unary operation for symbolic regression.
+
+Pairs an operation name with its implementation, ensuring the operation's
+identity is preserved throughout the search process. The name is used to
+identify the operation in the internal representation.
+
+@
+UnaryFunc "square" (\\x -> x \`F.pow\` 2)
+UnaryFunc "log" log
+@
+-}
+data UnaryFunc where
+    UnaryFunc :: String -> (D.Expr Double -> D.Expr Double) -> UnaryFunc
+
+-- | Extract the name of a unary operation.
+getUnaryName :: UnaryFunc -> String
+getUnaryName (UnaryFunc name _) = name
+
+{- | Tagged binary operation for symbolic regression.
+
+Pairs an operation name with its implementation, ensuring the operation's
+identity is preserved throughout the search process. The name is used to
+identify the operation in the internal representation.
+
+@
+BinaryFunc "add" (+)
+BinaryFunc "mul" (*)
+@
+-}
+data BinaryFunc where
+    BinaryFunc :: String -> (D.Expr Double -> D.Expr Double -> D.Expr Double) -> BinaryFunc
+
+-- | Extract the name of a binary operation.
+getBinaryName :: BinaryFunc -> String
+getBinaryName (BinaryFunc name _) = name
+
 {- | Configuration for the symbolic regression algorithm.
 
 Use 'defaultRegressionConfig' as a starting point and modify fields as needed:
@@ -149,9 +185,9 @@ data RegressionConfig = RegressionConfig
     -- ^ Probability of crossover between expressions (default: 0.95)
     , mutationProbability :: Double
     -- ^ Probability of mutation (default: 0.3)
-    , unaryFunctions :: [D.Expr Double -> D.Expr Double]
+    , unaryFunctions :: [UnaryFunc]
     -- ^ Unary operations to include in the search space (default: @[]@)
-    , binaryFunctions :: [D.Expr Double -> D.Expr Double -> D.Expr Double]
+    , binaryFunctions :: [BinaryFunc]
     {- ^ Binary operations to include in the search space
     (default: @[(+), (-), (*), (\/)]@)
     -}
@@ -200,8 +236,18 @@ defaultRegressionConfig =
         , tournamentSize = 3
         , crossoverProbability = 0.95
         , mutationProbability = 0.3
-        , unaryFunctions = [(`F.pow` 2), (`F.pow` 3), log, (1 /)]
-        , binaryFunctions = [(+), (-), (*), (/)]
+        , unaryFunctions =
+            [ UnaryFunc "square" (\x -> x `F.pow` 2)
+            , UnaryFunc "cube" (\x -> x `F.pow` 3)
+            , UnaryFunc "log" log
+            , UnaryFunc "recip" (1 /)
+            ]
+        , binaryFunctions =
+            [ BinaryFunc "add" (+)
+            , BinaryFunc "sub" (-)
+            , BinaryFunc "mul" (*)
+            , BinaryFunc "div" (/)
+            ]
         , numParams = -1
         , generational = False
         , simplifyExpressions = True
@@ -270,13 +316,9 @@ fit cfg targetColumn df = do
                 Array S Ix2 Double
         toTarget d = fromLists' Seq (D.columnAsList targetColumn d) :: Array S Ix1 Double
         nonterminals =
-            intercalate
-                ","
-                ( Prelude.map
-                    (toNonTerminal . (\f -> f (F.col "fake1") (F.col "fake2")))
-                    (binaryFunctions cfg)
-                    ++ Prelude.map (toNonTerminal . (\f -> f (F.col "fake1"))) (unaryFunctions cfg)
-                )
+            intercalate "," $
+                Prelude.map getBinaryName (binaryFunctions cfg)
+                    ++ Prelude.map getUnaryName (unaryFunctions cfg)
         varnames =
             intercalate
                 ","

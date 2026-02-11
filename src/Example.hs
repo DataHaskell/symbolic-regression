@@ -15,8 +15,10 @@ main = do
 
     exprs <- fit defaultRegressionConfig mpg df
 
-    -- Print each expression (use show or custom formatting)
-    mapM_ (putStrLn . show) exprs
+    -- Print each expression
+    mapM_
+        (\(i, e) -> putStrLn $ "Model " ++ show i ++ ": " ++ show e)
+        (zip [1 ..] exprs)
 
     -- Create named expressions for different complexity levels
     let levels = zipWith (F..=) ["level_1", "level_2", "level_3"] exprs

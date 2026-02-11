@@ -44,16 +44,21 @@
                 prev.callHackageDirect {
                   pkg = "srtree";
                   ver = "2.0.1.6";
-                  sha256 = "sha256-D561wnKoFRr/HSviacsbtF5VnJHehG73LOmWM4TxlNs="; # Nix will tell you
+                  sha256 = "sha256-D561wnKoFRr/HSviacsbtF5VnJHehG73LOmWM4TxlNs=";
+                } { }
+              );
+
+              dataframe = pkgs'.haskell.lib.dontCheck (
+                prev.callHackageDirect {
+                  pkg = "dataframe";
+                  ver = "0.4.1.0";
+                  sha256 = "sha256-u4FrhD+oOnQiGazq/TWuL0PzUvLKKAkz679tZSkiMaY=";
                 } { }
               );
 
               # Jailbreak packages that depend on old random
               time-compat = pkgs'.haskell.lib.doJailbreak prev.time-compat;
               splitmix = pkgs'.haskell.lib.doJailbreak prev.splitmix;
-
-              # Mark dataframe as unbroken
-              dataframe = pkgs'.haskell.lib.markUnbroken prev.dataframe;
             }
           );
 

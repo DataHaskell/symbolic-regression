@@ -7,8 +7,8 @@ import qualified DataFrame as D
 import qualified DataFrame.Functions as F
 import Symbolic.Regression
 
-main :: IO ()
-main = do
+example_predictMPG :: IO ()
+example_predictMPG = do
     df <- D.readParquet "./data/mtcars.parquet"
 
     -- Define mpg as a column reference

@@ -8,6 +8,14 @@ import qualified DataFrame.Functions as F
 import Symbolic.Regression
 import Test.HUnit
 
+-- | Default regression config for testing: disabled tracing and defined seed for deterministic rng
+defaultTestConfig :: RegressionConfig
+defaultTestConfig =
+    defaultRegressionConfig
+        { showTrace = False
+        , seed = Just 0
+        }
+
 -- | Test linear formula regression (y = 2x + 1)
 testLinearFormula :: Test
 testLinearFormula = TestCase $ do
@@ -16,17 +24,15 @@ testLinearFormula = TestCase $ do
         df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
         target = F.col @Double "y"
         cfg =
-            defaultRegressionConfig
+            defaultTestConfig
                 { generations = 30
                 , populationSize = 80
-                , showTrace = False
                 , maxExpressionSize = 4
                 }
 
     exprs <- fit cfg target df
 
     assertBool "Should find at least one expression" (not $ null exprs)
-    
 
     -- Test accuracy: the best expression should closely match y = 2x + 1
     let bestExpr = last exprs -- Most complex/accurate should be last
@@ -47,16 +53,14 @@ testConstantFormula = TestCase $ do
         df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
         target = F.col @Double "y"
         cfg =
-            defaultRegressionConfig
+            defaultTestConfig
                 { generations = 3
                 , populationSize = 10
-                , showTrace = False
                 , maxExpressionSize = 1
                 }
 
     exprs <- fit cfg target df
     assertBool "Should handle constant target without crashing" (not $ null exprs)
-    
 
     -- Test that it can predict the constant correctly
     let bestExpr = last exprs
@@ -75,17 +79,15 @@ testQuadraticFormula = TestCase $ do
         df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
         target = F.col @Double "y"
         cfg =
-            defaultRegressionConfig
+            defaultTestConfig
                 { generations = 50
                 , populationSize = 150
-                , showTrace = False
                 , maxExpressionSize = 8 -- Need more complexity for quadratic
                 }
 
     exprs <- fit cfg target df
 
     assertBool "Should find at least one expression" (not $ null exprs)
-    
 
     -- Test accuracy: the best expression should closely match y = x² + 2x + 3
     let bestExpr = last exprs -- Most complex/accurate should be last
@@ -107,17 +109,15 @@ testTwoVariableFormula = TestCase $ do
         df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys), ("z", D.fromList zs)]
         target = F.col @Double "z"
         cfg =
-            defaultRegressionConfig
+            defaultTestConfig
                 { generations = 20
                 , populationSize = 60
-                , showTrace = False
                 , maxExpressionSize = 3
                 }
 
     exprs <- fit cfg target df
 
     assertBool "Should find at least one expression" (not $ null exprs)
-    
 
     -- Test accuracy: the best expression should closely match z = x + y
     let bestExpr = last exprs -- Most complex/accurate should be last

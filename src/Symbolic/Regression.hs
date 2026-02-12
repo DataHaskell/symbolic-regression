@@ -54,6 +54,21 @@ module Symbolic.Regression (
     RegressionConfig (..),
     ValidationConfig (..),
     defaultRegressionConfig,
+
+    -- * Function constructors and utilities
+    UnaryFunc,
+    BinaryFunc,
+    uLog,
+    uSquare,
+    uCube,
+    uRecip,
+    bAdd,
+    bSub,
+    bMul,
+    bDiv,
+    bPow,
+    getUnaryName,
+    getBinaryName,
 ) where
 
 import Control.Exception (throw)

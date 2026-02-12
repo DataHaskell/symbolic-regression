@@ -136,6 +136,21 @@ UnaryFunc USquare (\\x -> x \`F.pow\` 2)
 UnaryFunc ULog log
 @
 -}
+data UnaryFunc = UnaryFunc UnaryOpName (D.Expr Double -> D.Expr Double)
+
+-- | Convenience constructors for UnaryFunc
+uLog :: (Expr Double -> Expr Double) -> UnaryFunc
+uLog = UnaryFunc ULog
+
+uSquare :: (Expr Double -> Expr Double) -> UnaryFunc
+uSquare = UnaryFunc USquare
+
+uCube :: (Expr Double -> Expr Double) -> UnaryFunc
+uCube = UnaryFunc UCube
+
+uRecip :: (Expr Double -> Expr Double) -> UnaryFunc
+uRecip = UnaryFunc URecip
+
 data UnaryOpName
     = ULog
     | USquare
@@ -149,9 +164,6 @@ instance Show UnaryOpName where
     show UCube = "cube"
     show URecip = "recip"
 
-data UnaryFunc
-    = UnaryFunc UnaryOpName (D.Expr Double -> D.Expr Double)
-
 -- | Extract the name of a unary operation.
 getUnaryName :: UnaryFunc -> String
 getUnaryName (UnaryFunc name _) = show name
@@ -163,8 +175,8 @@ identity is preserved throughout the search process. The name is used to
 identify the operation in the internal representation.
 
 @
-BinaryFunc "add" (+)
-BinaryFunc "mul" (*)
+BinaryFunc BAdd (+)
+BinaryFunc BMul (*)
 @
 -}
 data BinaryOpName
@@ -182,12 +194,27 @@ instance Show BinaryOpName where
     show BDiv = "div"
     show BPow = "pow"
 
-data BinaryFunc
-    = BinaryFunc BinaryOpName (D.Expr Double -> D.Expr Double -> D.Expr Double)
+data BinaryFunc = BinaryFunc BinaryOpName (D.Expr Double -> D.Expr Double -> D.Expr Double)
 
 -- | Extract the name of a binary operation.
 getBinaryName :: BinaryFunc -> String
 getBinaryName (BinaryFunc name _) = show name
+
+-- | Convenience constructors for BinaryFunc
+bAdd :: (Expr Double -> Expr Double -> Expr Double) -> BinaryFunc
+bAdd = BinaryFunc BAdd
+
+bSub :: (Expr Double -> Expr Double -> Expr Double) -> BinaryFunc
+bSub = BinaryFunc BSub
+
+bMul :: (Expr Double -> Expr Double -> Expr Double) -> BinaryFunc
+bMul = BinaryFunc BMul
+
+bDiv :: (Expr Double -> Expr Double -> Expr Double) -> BinaryFunc
+bDiv = BinaryFunc BDiv
+
+bPow :: (Expr Double -> Expr Double -> Expr Double) -> BinaryFunc
+bPow = BinaryFunc BPow
 
 {- | Configuration for the symbolic regression algorithm.
 
@@ -279,16 +306,16 @@ defaultRegressionConfig =
         , crossoverProbability = 0.95
         , mutationProbability = 0.3
         , unaryFunctions =
-            [ UnaryFunc USquare (\x -> x `F.pow` 2)
-            , UnaryFunc UCube (\x -> x `F.pow` 3)
-            , UnaryFunc ULog log
-            , UnaryFunc URecip (1 /)
+            [ uSquare (`F.pow` 2)
+            , uCube (`F.pow` 3)
+            , uLog log
+            , uRecip (1 /)
             ]
         , binaryFunctions =
-            [ BinaryFunc BAdd (+)
-            , BinaryFunc BSub (-)
-            , BinaryFunc BMul (*)
-            , BinaryFunc BDiv (/)
+            [ bAdd (+)
+            , bSub (-)
+            , bMul (*)
+            , bDiv (/)
             ]
         , numParams = -1
         , generational = False

@@ -76,6 +76,7 @@
               haskell-language-server
               git
               fourmolu
+              nixfmt
             ];
           };
         };

@@ -10,11 +10,14 @@ symbolic-regression integrates symbolic regression capabilities into a DataFrame
 
 ```haskell
 ghci> import qualified DataFrame as D
-ghci> import DataFrame.Functions ((.=))
+ghci> import qualified DataFrame.Functions as F
 ghci> import Symbolic.Regression
 
 -- Load your data
 ghci> df <- D.readParquet "./data/mtcars.parquet"
+
+-- Define mpg as a column reference
+ghci> let mpg = F.col "mpg"
 
 -- Run symbolic regression to predict 'mpg'
 -- NOTE: ALL COLUMNS MUST BE CONVERTED TO DOUBLE FIRST
@@ -24,19 +27,20 @@ ghci> df <- D.readParquet "./data/mtcars.parquet"
 ghci> exprs <- fit defaultRegressionConfig mpg df
 
 -- View discovered expressions (Pareto front from simplest to most complex)
-ghci> map D.prettyPrint exprs
--- [ qsec,
--- , 57.33 / wt
--- , 10.75 + (1557.67 / disp)]
+ghci> mapM_ (\(i, e) -> putStrLn $ "Model " ++ show i ++ ": " ++ D.prettyPrint e) (zip [1..] exprs)
 
--- Create named expressions that we'll use in a dataframe.
-ghci> levels = zipWith (.=) ["level_1", "level_2", "level_3"] exprs
+-- Create named expressions for different complexity levels  
+ghci> import qualified Data.Text as T
+ghci> let levels = zipWith (F..=) (map (T.pack . ("level_" ++) . show) [1..]) exprs
 
--- Show the various predictions in our dataframe.
-ghci> D.deriveMany levels df
+-- Show the various predictions in our dataframe
+ghci> let df' = D.deriveMany levels df
 
--- Or pick the best one
-ghci> D.derive "prediction" (last exprs) df
+-- Or pick the best one for prediction
+ghci> let df'' = D.derive "prediction" (last exprs) df'
+
+-- Display the results
+ghci> D.display (D.DisplayOptions 5) df''
 ```
 
 ## Configuration
@@ -102,3 +106,14 @@ To install symbolic-regression you'll need:
 * libz: `sudo apt install libz-dev`
 * libnlopt: `sudo apt install libnlopt-dev`
 * libgmp: `sudo apt install libgmp-dev`
+
+### Nix Development Environment
+For Nix users with flakes enabled:
+
+```bash
+git clone <repo-url>
+cd symbolic-regression
+nix develop -c cabal repl
+```
+
+Then follow the Quick Start example above.

@@ -19,11 +19,13 @@ off complexity and accuracy.
 
 @
 import qualified DataFrame as D
-import DataFrame.Functions ((.=))
+import qualified DataFrame.Functions as F
 import Symbolic.Regression
 
 -- Load your data
 df <- D.readParquet "./data/mtcars.parquet"
+
+let mpg = F.col "mpg"
 
 -- Run symbolic regression to predict 'mpg'
 exprs <- fit defaultRegressionConfig mpg df

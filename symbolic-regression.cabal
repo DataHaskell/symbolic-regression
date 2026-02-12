@@ -19,7 +19,7 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Symbolic.Regression, Example
+    exposed-modules:  Symbolic.Regression
     build-depends:    base >= 4 && <5
                     , dataframe ^>= 0.4.1
                     , attoparsec >=0.14.4 && <0.15
@@ -62,4 +62,9 @@ test-suite symbolic-regression-test
     main-is:          Main.hs
     build-depends:
         base >= 4 && <5,
-        symbolic-regression
+        symbolic-regression,
+        HUnit >= 1.6 && < 1.7,
+        dataframe ^>= 0.4.1,
+        random >= 1.2 && < 1.4,
+        text >= 2.0 && < 3,
+        time >= 1.12 && < 2

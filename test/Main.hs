@@ -8,7 +8,7 @@ import qualified DataFrame.Functions as F
 import Symbolic.Regression
 import Test.HUnit
 
--- | Default regression config for testing: disabled tracing and defined seed for deterministic rng
+-- Default regression config for deterministic testing
 defaultTestConfig :: RegressionConfig
 defaultTestConfig =
     defaultRegressionConfig
@@ -16,119 +16,123 @@ defaultTestConfig =
         , seed = Just 0
         }
 
--- | Test linear formula regression (y = 2x + 1)
+-- Compute maximum absolute error between target and predicted expression
+maxAbsError :: D.Expr Double -> D.Expr Double -> D.DataFrame -> Double
+maxAbsError target predicted df =
+    let (predColExpr, df') = D.deriveWithExpr "__test_predicted" predicted df
+        actualVals = D.columnAsList target df' :: [Double]
+        predVals = D.columnAsList predColExpr df' :: [Double]
+     in maximum (zipWith (\a p -> abs (a - p)) actualVals predVals)
+
+{-
+
+(predicted, predDf) = D.deriveWithExpr "predicted" bestExpr
+predValues = D.columnAsList predicted predDf
+
+-}
+
+-- Extract best evolved expression (last in population history)
+bestExpression :: RegressionConfig -> D.Expr Double -> D.DataFrame -> IO (Maybe (D.Expr Double))
+bestExpression cfg target df = do
+    exprs <- fit cfg target df
+    pure $ if null exprs then Nothing else Just (last exprs)
+
+-- High-level regression verification used by tests
+verifyRegressionAccuracy ::
+    String ->
+    RegressionConfig ->
+    D.Expr Double ->
+    D.DataFrame ->
+    Double ->
+    Assertion
+verifyRegressionAccuracy label cfg target df tolerance = do
+    mBest <- bestExpression cfg target df
+    case mBest of
+        Nothing ->
+            assertFailure noResultMsg
+        Just bestExpr -> do
+            let err = maxAbsError target bestExpr df
+            assertBool (errorMsg err) (err < tolerance)
+  where
+    noResultMsg =
+        label ++ ": regression returned no expressions"
+
+    errorMsg err =
+        label
+            ++ ": expected max abs error < "
+            ++ show tolerance
+            ++ ", got "
+            ++ show err
+
+-- Linear: y = 2x + 1
 testLinearFormula :: Test
-testLinearFormula = TestCase $ do
-    let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0] :: [Double]
-        ys = map (\x -> 2 * x + 1) xs -- Known formula: y = 2x + 1
-        df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
-        target = F.col @Double "y"
-        cfg =
-            defaultTestConfig
-                { generations = 30
-                , populationSize = 80
-                , maxExpressionSize = 4
-                }
+testLinearFormula =
+    TestCase $
+        let xs = [1.0 .. 10.0] :: [Double]
+            ys = map (\x -> 2 * x + 1) xs
+            df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
+            target = F.col @Double "y"
+            cfg =
+                defaultTestConfig
+                    { generations = 30
+                    , populationSize = 80
+                    , maxExpressionSize = 4
+                    }
+         in verifyRegressionAccuracy "Linear Formula" cfg target df 1.0
 
-    exprs <- fit cfg target df
-
-    assertBool "Should find at least one expression" (not $ null exprs)
-
-    -- Test accuracy: the best expression should closely match y = 2x + 1
-    let bestExpr = last exprs -- Most complex/accurate should be last
-        predDf = D.derive "predicted" bestExpr df
-        actualVals = D.columnAsList (F.col @Double "y") predDf :: [Double]
-        predVals = D.columnAsList (F.col @Double "predicted") predDf :: [Double]
-        errorValues = zipWith (\a p -> abs (a - p)) actualVals predVals
-        maxError = maximum errorValues
-
-    -- For perfect linear data, should have reasonably low error
-    assertBool ("Max error should be < 1.0, got: " ++ show maxError) (maxError < 1.0)
-
--- | Test constant formula regression (y = 42)
+-- Constant: y = 42
 testConstantFormula :: Test
-testConstantFormula = TestCase $ do
-    let xs = [1.0, 2.0, 3.0, 4.0, 5.0] :: [Double]
-        ys = replicate 5 42.0 :: [Double] -- Constant target: y = 42
-        df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
-        target = F.col @Double "y"
-        cfg =
-            defaultTestConfig
-                { generations = 3
-                , populationSize = 10
-                , maxExpressionSize = 1
-                }
+testConstantFormula =
+    TestCase $
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0] :: [Double]
+            ys = replicate 5 (42.0 :: Double)
+            df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
+            target = F.col @Double "y"
+            cfg =
+                defaultTestConfig
+                    { generations = 3
+                    , populationSize = 10
+                    , maxExpressionSize = 1
+                    }
+         in verifyRegressionAccuracy "Constant Formula" cfg target df 1.0
 
-    exprs <- fit cfg target df
-    assertBool "Should handle constant target without crashing" (not $ null exprs)
-
-    -- Test that it can predict the constant correctly
-    let bestExpr = last exprs
-        predDf = D.derive "predicted" bestExpr df
-        predVals = D.columnAsList (F.col @Double "predicted") predDf :: [Double]
-        errorValues = map (\p -> abs (42.0 - p)) predVals
-        maxError = maximum errorValues
-
-    assertBool ("Should predict constant accurately, max error: " ++ show maxError) (maxError < 1.0)
-
--- | Test quadratic formula regression (y = x² + 2x + 3)
+-- Quadratic: y = x² + 2x + 3
 testQuadraticFormula :: Test
-testQuadraticFormula = TestCase $ do
-    let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] :: [Double]
-        ys = map (\x -> x * x + 2 * x + 3) xs -- Known formula: y = x² + 2x + 3
-        df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
-        target = F.col @Double "y"
-        cfg =
-            defaultTestConfig
-                { generations = 50
-                , populationSize = 150
-                , maxExpressionSize = 8 -- Need more complexity for quadratic
-                }
+testQuadraticFormula =
+    TestCase $
+        let xs = [1.0 .. 6.0] :: [Double]
+            ys = map (\x -> x * x + 2 * x + 3) xs
+            df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys)]
+            target = F.col @Double "y"
+            cfg =
+                defaultTestConfig
+                    { generations = 50
+                    , populationSize = 150
+                    , maxExpressionSize = 8
+                    }
+         in verifyRegressionAccuracy "Quadratic Formula" cfg target df 0.5
 
-    exprs <- fit cfg target df
-
-    assertBool "Should find at least one expression" (not $ null exprs)
-
-    -- Test accuracy: the best expression should closely match y = x² + 2x + 3
-    let bestExpr = last exprs -- Most complex/accurate should be last
-        predDf = D.derive "predicted" bestExpr df
-        actualVals = D.columnAsList (F.col @Double "y") predDf :: [Double]
-        predVals = D.columnAsList (F.col @Double "predicted") predDf :: [Double]
-        errorValues = zipWith (\a p -> abs (a - p)) actualVals predVals
-        maxError = maximum errorValues
-
-    -- Quadratic might need slightly higher tolerance than linear
-    assertBool ("Max error should be < 0.5, got: " ++ show maxError) (maxError < 0.5)
-
--- | Test two-variable formula regression (z = x + y)
+-- Two variable: z = x + y
 testTwoVariableFormula :: Test
-testTwoVariableFormula = TestCase $ do
-    let xs = [1.0, 2.0, 3.0, 4.0, 5.0] :: [Double]
-        ys = [2.0, 3.0, 1.0, 4.0, 2.0] :: [Double]
-        zs = zipWith (+) xs ys -- Known formula: z = x + y
-        df = D.fromNamedColumns [("x", D.fromList xs), ("y", D.fromList ys), ("z", D.fromList zs)]
-        target = F.col @Double "z"
-        cfg =
-            defaultTestConfig
-                { generations = 20
-                , populationSize = 60
-                , maxExpressionSize = 3
-                }
-
-    exprs <- fit cfg target df
-
-    assertBool "Should find at least one expression" (not $ null exprs)
-
-    -- Test accuracy: the best expression should closely match z = x + y
-    let bestExpr = last exprs -- Most complex/accurate should be last
-        predDf = D.derive "predicted" bestExpr df
-        actualVals = D.columnAsList (F.col @Double "z") predDf :: [Double]
-        predVals = D.columnAsList (F.col @Double "predicted") predDf :: [Double]
-        errorValues = zipWith (\a p -> abs (a - p)) actualVals predVals
-        maxError = maximum errorValues
-
-    -- Two-variable linear should be quite accurate
-    assertBool ("Max error should be < 0.1, got: " ++ show maxError) (maxError < 0.1)
+testTwoVariableFormula =
+    TestCase $
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0] :: [Double]
+            ys = [2.0, 3.0, 1.0, 4.0, 2.0] :: [Double]
+            zs = zipWith (+) xs ys
+            df =
+                D.fromNamedColumns
+                    [ ("x", D.fromList xs)
+                    , ("y", D.fromList ys)
+                    , ("z", D.fromList zs)
+                    ]
+            target = F.col @Double "z"
+            cfg =
+                defaultTestConfig
+                    { generations = 20
+                    , populationSize = 60
+                    , maxExpressionSize = 3
+                    }
+         in verifyRegressionAccuracy "Two-Variable Formula" cfg target df 0.1
 
 allTests :: Test
 allTests =

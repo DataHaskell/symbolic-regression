@@ -147,8 +147,10 @@ identity is preserved throughout the search process. The name is used to
 identify the operation in the internal representation.
 
 @
-UnaryFunc USquare (\\x -> x \`F.pow\` 2)
-UnaryFunc ULog log
+myUnaryFunctions = [ uSquare (\`F.pow\` 2)
+                   , uLog log  
+                   , uRecip (1 /)
+                   ]
 @
 -}
 data UnaryFunc = UnaryFunc UnaryOpName (D.Expr Double -> D.Expr Double)
@@ -190,8 +192,11 @@ identity is preserved throughout the search process. The name is used to
 identify the operation in the internal representation.
 
 @
-BinaryFunc BAdd (+)
-BinaryFunc BMul (*)
+myBinaryFunctions = [ bAdd (+)
+                    , bSub (-)
+                    , bMul (*)
+                    , bDiv (/)
+                    ]
 @
 -}
 data BinaryOpName

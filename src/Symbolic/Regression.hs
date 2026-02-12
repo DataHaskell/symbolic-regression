@@ -125,6 +125,7 @@ import Data.SRTree.Random
 
 import Algorithm.EqSat (runEqSat)
 import Algorithm.EqSat.SearchSR
+import Data.Time.Clock (NominalDiffTime)
 import Data.Time.Clock.POSIX
 import Text.ParseSR
 
@@ -150,7 +151,7 @@ identify the operation in the internal representation.
 
 @
 myUnaryFunctions = [ uSquare (\`F.pow\` 2)
-                   , uLog log  
+                   , uLog log
                    , uRecip (1 /)
                    ]
 @
@@ -496,6 +497,234 @@ finalizeEGraph cfg =
     unless (null (dumpTo cfg)) $
         get >>= (io . BS.writeFile (dumpTo cfg) . encode)
 
+-- | Crossover operation between two expressions
+crossoverExpressions ::
+    RegressionConfig ->
+    Int -> -- maxExpressionSize
+    (Fix SRTree -> Fix SRTree) -> -- relabel function
+    EClassId ->
+    EClassId ->
+    RndEGraph EClassId
+crossoverExpressions cfg maxSize relabel p1 p2 = do
+    sz <- getSize p1
+    coin <- rnd $ tossBiased (crossoverProbability cfg)
+    if sz == 1 || not coin
+        then rnd (randomFrom [p1, p2])
+        else do
+            pos <- rnd $ randomRange (1, sz - 1)
+            cands <- getAllSubClasses p2
+            tree <- getSubtree pos 0 Nothing [] cands p1
+            fromTree myCost (relabel tree) >>= canonical
+  where
+    getAllSubClasses p' = do
+        p <- canonical p'
+        en <- getBestENode p
+        case en of
+            Bin _ l r -> do
+                ls <- getAllSubClasses l
+                rs <- getAllSubClasses r
+                pure (p : ls <> rs)
+            Uni _ t -> (p :) <$> getAllSubClasses t
+            _ -> pure [p]
+
+    getSubtree ::
+        Int ->
+        Int ->
+        Maybe (EClassId -> ENode) ->
+        [Maybe (EClassId -> ENode)] ->
+        [EClassId] ->
+        EClassId ->
+        RndEGraph (Fix SRTree)
+    getSubtree 0 sz (Just parent) mGrandParents cands p' = do
+        p <- canonical p'
+        candidates' <-
+            filterM (fmap (< maxSize - sz) . getSize) cands
+        candidates <-
+            filterM (doesNotExistGens mGrandParents . parent) candidates'
+                >>= traverse canonical
+        if null candidates
+            then getBestExpr p
+            else do
+                subtree <- rnd (randomFrom candidates)
+                getBestExpr subtree
+    getSubtree pos sz parent mGrandParents cands p' = do
+        p <- canonical p'
+        root <- getBestENode p >>= canonize
+        case root of
+            Param ix -> pure . Fix $ Param ix
+            Const x -> pure . Fix $ Const x
+            Var ix -> pure . Fix $ Var ix
+            Uni f t' -> do
+                t <- canonical t'
+                Fix . Uni f
+                    <$> getSubtree (pos - 1) (sz + 1) (Just $ Uni f) (parent : mGrandParents) cands t
+            Bin op l'' r'' -> do
+                l <- canonical l''
+                r <- canonical r''
+                szLft <- getSize l
+                szRgt <- getSize r
+                if szLft < pos
+                    then do
+                        l' <- getBestExpr l
+                        r' <-
+                            getSubtree
+                                (pos - szLft - 1)
+                                (sz + szLft + 1)
+                                (Just $ Bin op l)
+                                (parent : mGrandParents)
+                                cands
+                                r
+                        pure . Fix $ Bin op l' r'
+                    else do
+                        l' <-
+                            getSubtree
+                                (pos - 1)
+                                (sz + szRgt + 1)
+                                (Just (\t -> Bin op t r))
+                                (parent : mGrandParents)
+                                cands
+                                l
+                        r' <- getBestExpr r
+                        pure . Fix $ Bin op l' r'
+
+-- | Generate detailed expression report with multiple metrics and formats
+generateExpressionReport ::
+    RegressionConfig ->
+    String -> -- varnames
+    [(DataSet, DataSet)] -> -- dataTrainVals
+    [DataSet] -> -- dataTests
+    Bool -> -- shouldReparam
+    (Fix SRTree -> StateT EGraph (StateT StdGen IO) (Double, [Array S Ix1 Double])) -> -- fitFun
+    Int -> -- expression index
+    EClassId ->
+    RndEGraph [String]
+generateExpressionReport cfg varnames dataTrainVals dataTests shouldReparam fitFun ix ec' = do
+    ec <- canonical ec'
+    thetas' <- gets (fmap (_theta . _info) . (IM.!? ec) . _eClass)
+    bestExpr <-
+        (if simplifyExpressions cfg then simplifyEqSatDefault else id)
+            <$> getBestExpr ec
+
+    let best' =
+            if shouldReparam then relabelParams bestExpr else relabelParamsOrder bestExpr
+        nParams' = countParamsUniq best'
+        fromSz (MA.Sz x) = x
+        nThetas = fmap (Prelude.map (fromSz . MA.size)) thetas'
+    (_, thetas) <-
+        if maybe False (Prelude.any (/= nParams')) nThetas
+            then fitFun best'
+            else pure (1.0, fromMaybe [] thetas')
+
+    maxLoss <- negate . fromJust <$> getFitness ec
+    forM (Data.List.zip4 [(0 :: Int) ..] dataTrainVals dataTests thetas) $ \(view, (dataTrain, dataVal), dataTest, theta') -> do
+        let (x, y, mYErr) = dataTrain
+            (x_val, y_val, mYErr_val) = dataVal
+            (x_te, y_te, mYErr_te) = dataTest
+            distribution = lossFunction cfg
+
+            expr = paramsToConst (MA.toList theta') best'
+            showNA z = if isNaN z then "" else show z
+            r2_train = r2 x y best' theta'
+            r2_val = r2 x_val y_val best' theta'
+            r2_te = r2 x_te y_te best' theta'
+            nll_train = nll distribution mYErr x y best' theta'
+            nll_val = nll distribution mYErr_val x_val y_val best' theta'
+            nll_te = nll distribution mYErr_te x_te y_te best' theta'
+            mdl_train = fractionalBayesFactor distribution mYErr x y theta' best'
+            mdl_val = fractionalBayesFactor distribution mYErr_val x_val y_val theta' best'
+            mdl_te = fractionalBayesFactor distribution mYErr_te x_te y_te theta' best'
+            vals =
+                intercalate "," $
+                    Prelude.map
+                        showNA
+                        [ nll_train
+                        , nll_val
+                        , nll_te
+                        , maxLoss
+                        , r2_train
+                        , r2_val
+                        , r2_te
+                        , mdl_train
+                        , mdl_val
+                        , mdl_te
+                        ]
+            thetaStr = intercalate ";" $ Prelude.map show (MA.toList theta')
+            showExprFun = if null varnames then showExpr else showExprWithVars (splitOn "," varnames)
+            showLatexFun = if null varnames then showLatex else showLatexWithVars (splitOn "," varnames)
+        pure $
+            show ix
+                <> ","
+                <> show view
+                <> ","
+                <> showExprFun expr
+                <> ","
+                <> "\""
+                <> showPython best'
+                <> "\","
+                <> "\"$$"
+                <> showLatexFun best'
+                <> "$$\","
+                <> thetaStr
+                <> ","
+                <> show @Int (countNodes $ convertProtectedOps expr)
+                <> ","
+                <> vals
+
+-- | Run the main evolutionary loop with timing and memory management
+runEvolutionEngine ::
+    RegressionConfig ->
+    Int -> -- maxMem
+    ([EClassId] -> RndEGraph EClassId) -> -- evolve function
+    (Int -> EClassId -> RndEGraph [String]) -> -- printExpr function
+    RndEGraph () -> -- cleanEGraph function
+    POSIXTime ->
+    Maybe NominalDiffTime ->
+    ([EClassId], [[String]], Int) ->
+    RndEGraph ([EClassId], [[String]], Int)
+runEvolutionEngine cfg maxMem evolve printExpr' cleanEGraph t0 mTime initial =
+    iterateFor (generations cfg) t0 mTime initial generationStep
+  where
+    generationStep _ (ps', out, curIx) = do
+        newPop' <- replicateM (populationSize cfg) (evolve ps')
+
+        out' <-
+            if showTrace cfg
+                then forM (Prelude.zip [curIx ..] newPop') $ uncurry printExpr'
+                else pure []
+
+        totSz <- gets (Map.size . _eNodeToEClass)
+        let full = totSz > max maxMem (populationSize cfg)
+        when full (cleanEGraph >> cleanDB)
+
+        newPop <-
+            if generational cfg
+                then Prelude.mapM canonical newPop'
+                else selectNextPopulation full newPop'
+
+        pure (newPop, out <> out', curIx + populationSize cfg)
+
+    selectNextPopulation full newPop' = do
+        pareto <- concat <$> forM [1 .. maxExpressionSize cfg] (`getTopFitEClassWithSize` 2)
+        let remainder = populationSize cfg - length pareto
+        lft <-
+            if full
+                then getTopFitEClassThat remainder (const True)
+                else pure $ Prelude.take remainder newPop'
+        Prelude.mapM canonical (pareto <> lft)
+
+    iterateFor 0 _ _ xs _ = pure xs
+    iterateFor n t0' maxT xs f = do
+        xs' <- f n xs
+        t1 <- io getPOSIXTime
+        let delta = t1 - t0'
+            maxT' = subtract delta <$> maxT
+        case maxT' of
+            Nothing -> iterateFor (n - 1) t1 maxT' xs' f
+            Just mt ->
+                if mt <= 0
+                    then pure xs
+                    else iterateFor (n - 1) t1 maxT' xs' f
+
 egraphGP ::
     RegressionConfig ->
     String -> -- nonterminals
@@ -563,49 +792,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
     rndNonTerm = randomFrom nonTerms
 
     -- Main evolution loop
-    runGenerations t0 mTime initial =
-        iterateFor (generations cfg) t0 mTime initial generationStep
-      where
-        generationStep _ (ps', out, curIx) = do
-            newPop' <- replicateM (populationSize cfg) (evolve ps')
-
-            out' <-
-                if showTrace cfg
-                    then forM (Prelude.zip [curIx ..] newPop') $ uncurry printExpr'
-                    else pure []
-
-            totSz <- gets (Map.size . _eNodeToEClass)
-            let full = totSz > max maxMem (populationSize cfg)
-            when full (cleanEGraph >> cleanDB)
-
-            newPop <-
-                if generational cfg
-                    then Prelude.mapM canonical newPop'
-                    else selectNextPopulation full newPop'
-
-            pure (newPop, out <> out', curIx + populationSize cfg)
-
-        selectNextPopulation full newPop' = do
-            pareto <- concat <$> forM [1 .. maxExpressionSize cfg] (`getTopFitEClassWithSize` 2)
-            let remainder = populationSize cfg - length pareto
-            lft <-
-                if full
-                    then getTopFitEClassThat remainder (const True)
-                    else pure $ Prelude.take remainder newPop'
-            Prelude.mapM canonical (pareto <> lft)
-
-    iterateFor 0 _ _ xs _ = pure xs
-    iterateFor n t0' maxT xs f = do
-        xs' <- f n xs
-        t1 <- io getPOSIXTime
-        let delta = t1 - t0'
-            maxT' = subtract delta <$> maxT
-        case maxT' of
-            Nothing -> iterateFor (n - 1) t1 maxT' xs' f
-            Just mt ->
-                if mt <= 0
-                    then pure xs
-                    else iterateFor (n - 1) t1 maxT' xs' f
+    runGenerations = runEvolutionEngine cfg maxMem evolve printExpr' cleanEGraph
 
     -- E-graph management
     cleanEGraph = do
@@ -659,88 +846,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
     combine (p1, p2) = crossover p1 p2 >>= mutate >>= canonical
 
     -- Crossover operator
-    crossover p1 p2 = do
-        sz <- getSize p1
-        coin <- rnd $ tossBiased (crossoverProbability cfg)
-        if sz == 1 || not coin
-            then rnd (randomFrom [p1, p2])
-            else do
-                pos <- rnd $ randomRange (1, sz - 1)
-                cands <- getAllSubClasses p2
-                tree <- getSubtree pos 0 Nothing [] cands p1
-                fromTree myCost (relabel tree) >>= canonical
-
-    -- Crossover and mutation helpers
-    getSubtree ::
-        Int ->
-        Int ->
-        Maybe (EClassId -> ENode) ->
-        [Maybe (EClassId -> ENode)] ->
-        [EClassId] ->
-        EClassId ->
-        RndEGraph (Fix SRTree)
-    getSubtree 0 sz (Just parent) mGrandParents cands p' = do
-        p <- canonical p'
-        candidates' <-
-            filterM (fmap (< maxExpressionSize cfg - sz) . getSize) cands
-        candidates <-
-            filterM (doesNotExistGens mGrandParents . parent) candidates'
-                >>= traverse canonical
-        if null candidates
-            then getBestExpr p
-            else do
-                subtree <- rnd (randomFrom candidates)
-                getBestExpr subtree
-    getSubtree pos sz parent mGrandParents cands p' = do
-        p <- canonical p'
-        root <- getBestENode p >>= canonize
-        case root of
-            Param ix -> pure . Fix $ Param ix
-            Const x -> pure . Fix $ Const x
-            Var ix -> pure . Fix $ Var ix
-            Uni f t' -> do
-                t <- canonical t'
-                Fix . Uni f
-                    <$> getSubtree (pos - 1) (sz + 1) (Just $ Uni f) (parent : mGrandParents) cands t
-            Bin op l'' r'' -> do
-                l <- canonical l''
-                r <- canonical r''
-                szLft <- getSize l
-                szRgt <- getSize r
-                if szLft < pos
-                    then do
-                        l' <- getBestExpr l
-                        r' <-
-                            getSubtree
-                                (pos - szLft - 1)
-                                (sz + szLft + 1)
-                                (Just $ Bin op l)
-                                (parent : mGrandParents)
-                                cands
-                                r
-                        pure . Fix $ Bin op l' r'
-                    else do
-                        l' <-
-                            getSubtree
-                                (pos - 1)
-                                (sz + szRgt + 1)
-                                (Just (\t -> Bin op t r))
-                                (parent : mGrandParents)
-                                cands
-                                l
-                        r' <- getBestExpr r
-                        pure . Fix $ Bin op l' r'
-
-    getAllSubClasses p' = do
-        p <- canonical p'
-        en <- getBestENode p
-        case en of
-            Bin _ l r -> do
-                ls <- getAllSubClasses l
-                rs <- getAllSubClasses r
-                pure (p : ls <> rs)
-            Uni _ t -> (p :) <$> getAllSubClasses t
-            _ -> pure [p]
+    crossover = crossoverExpressions cfg (maxExpressionSize cfg) relabel
 
     -- Mutation operator
     mutate p = do
@@ -814,78 +920,7 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
                         pure . Fix $ Bin op l' r'
 
     -- Output and reporting
-    printExpr' :: Int -> EClassId -> RndEGraph [String]
-    printExpr' ix ec' = do
-        ec <- canonical ec'
-        thetas' <- gets (fmap (_theta . _info) . (IM.!? ec) . _eClass)
-        bestExpr <-
-            (if simplifyExpressions cfg then simplifyEqSatDefault else id)
-                <$> getBestExpr ec
-
-        let best' =
-                if shouldReparam then relabelParams bestExpr else relabelParamsOrder bestExpr
-            nParams' = countParamsUniq best'
-            fromSz (MA.Sz x) = x
-            nThetas = fmap (Prelude.map (fromSz . MA.size)) thetas'
-        (_, thetas) <-
-            if maybe False (Prelude.any (/= nParams')) nThetas
-                then fitFun best'
-                else pure (1.0, fromMaybe [] thetas')
-
-        maxLoss <- negate . fromJust <$> getFitness ec
-        forM (Data.List.zip4 [(0 :: Int) ..] dataTrainVals dataTests thetas) $ \(view, (dataTrain, dataVal), dataTest, theta') -> do
-            let (x, y, mYErr) = dataTrain
-                (x_val, y_val, mYErr_val) = dataVal
-                (x_te, y_te, mYErr_te) = dataTest
-                distribution = lossFunction cfg
-
-                expr = paramsToConst (MA.toList theta') best'
-                showNA z = if isNaN z then "" else show z
-                r2_train = r2 x y best' theta'
-                r2_val = r2 x_val y_val best' theta'
-                r2_te = r2 x_te y_te best' theta'
-                nll_train = nll distribution mYErr x y best' theta'
-                nll_val = nll distribution mYErr_val x_val y_val best' theta'
-                nll_te = nll distribution mYErr_te x_te y_te best' theta'
-                mdl_train = fractionalBayesFactor distribution mYErr x y theta' best'
-                mdl_val = fractionalBayesFactor distribution mYErr_val x_val y_val theta' best'
-                mdl_te = fractionalBayesFactor distribution mYErr_te x_te y_te theta' best'
-                vals =
-                    intercalate "," $
-                        Prelude.map
-                            showNA
-                            [ nll_train
-                            , nll_val
-                            , nll_te
-                            , maxLoss
-                            , r2_train
-                            , r2_val
-                            , r2_te
-                            , mdl_train
-                            , mdl_val
-                            , mdl_te
-                            ]
-                thetaStr = intercalate ";" $ Prelude.map show (MA.toList theta')
-                showExprFun = if null varnames then showExpr else showExprWithVars (splitOn "," varnames)
-                showLatexFun = if null varnames then showLatex else showLatexWithVars (splitOn "," varnames)
-            pure $
-                show ix
-                    <> ","
-                    <> show view
-                    <> ","
-                    <> showExprFun expr
-                    <> ","
-                    <> "\""
-                    <> showPython best'
-                    <> "\","
-                    <> "\"$$"
-                    <> showLatexFun best'
-                    <> "$$\","
-                    <> thetaStr
-                    <> ","
-                    <> show @Int (countNodes $ convertProtectedOps expr)
-                    <> ","
-                    <> vals
+    printExpr' = generateExpressionReport cfg varnames dataTrainVals dataTests shouldReparam fitFun
 
     -- Initialization helpers
     insertTerms = forM terms (fromTree myCost >=> canonical)

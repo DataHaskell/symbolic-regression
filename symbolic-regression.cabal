@@ -21,7 +21,7 @@ library
     import:           warnings
     exposed-modules:  Symbolic.Regression
     build-depends:    base >= 4 && <5
-                    , dataframe ^>= 0.4
+                    , dataframe >= 1.0.0.1 < 2,
                     , attoparsec >=0.14.4 && <0.15
                     , attoparsec-expr >=0.1.1.2 && <0.2
                     , binary >=0.8.9.1 && <0.9
@@ -61,5 +61,7 @@ test-suite symbolic-regression-test
     hs-source-dirs:   test
     main-is:          Main.hs
     build-depends:
-        base >= 4 && <5,
-        symbolic-regression
+        base        >= 4 && <5,
+        symbolic-regression,
+        dataframe   >= 1.0.0.1 < 2,
+        random      >= 1.2 && < 1.4

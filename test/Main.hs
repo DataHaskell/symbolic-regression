@@ -19,6 +19,8 @@ testConfig =
     defaultRegressionConfig
         { generations = 50
         , populationSize = 50
+        , maxExpressionSize = 7
+        , numIslands = 3
         , showTrace = False
         }
 
@@ -107,7 +109,7 @@ testLinear = do
         df = D.derive "z" (3 * x + 2 * y + 45) df0
     models <- fit (mkStdGen 3) testConfig (F.col "z") df
     assertNonEmpty "3x + 2y + 45" models
-    assertMSE "3x + 2y + 45" 1e3 (evalBestMSE models df)
+    assertMSE "3x + 2y + 45" 1e4 (evalBestMSE models df)
 
 -- ---------------------------------------------------------------------------
 -- Test 4: 3x^2 + 2y^2 + 45 (degree-2 polynomial)

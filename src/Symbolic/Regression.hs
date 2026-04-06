@@ -1,4 +1,5 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -85,6 +86,7 @@ import Control.Monad (
     when,
     (>=>),
  )
+import Control.Exception (SomeException, evaluate, try)
 import Data.Binary (decode, encode)
 import qualified Data.ByteString.Lazy as BS
 import Data.Function (on)
@@ -95,8 +97,10 @@ import Data.List (
     intercalate,
     maximumBy,
     nub,
+    sortBy,
     zip4,
  )
+import Data.Ord (Down(..), comparing)
 import Data.List.Split (splitOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromJust, fromMaybe)
@@ -168,6 +172,10 @@ data RegressionConfig = RegressionConfig
     -- ^ File path to save e-graph state for later resumption (default: @\"\"@)
     , loadFrom :: String
     -- ^ File path to load e-graph state from a previous run (default: @\"\"@)
+    , numIslands :: Int
+    -- ^ Number of independent sub-populations (island model). (default: 15)
+    , migrationFraction :: Double
+    -- ^ Fraction of each island replaced by migrants each generation. (default: 0.05)
     }
 
 data ValidationConfig = ValidationConfig
@@ -210,24 +218,26 @@ defaultRegressionConfig :: RegressionConfig
 defaultRegressionConfig =
     RegressionConfig
         { generations = 100
-        , maxExpressionSize = 5
+        , maxExpressionSize = 15
         , validationConfig = Nothing
         , showTrace = True
         , lossFunction = MSE
         , numOptimisationIterations = 30
         , numParameterRetries = 2
         , populationSize = 100
-        , tournamentSize = 3
+        , tournamentSize = 10
         , crossoverProbability = 0.95
         , mutationProbability = 0.3
         , numParams = -1
         , generational = False
-        , simplifyExpressions = True
+        , simplifyExpressions = False
         , maxTime = -1
-        , unaryFunctions = [(`F.pow` 2), (`F.pow` 3), log, (1 /)]
+        , unaryFunctions = [(`F.pow` 2), (`F.pow` 3), log, (1 /), sqrt, exp, sin, cos]
         , binaryFunctions = [(+), (-), (*), (/)]
         , dumpTo = ""
         , loadFrom = ""
+        , numIslands = 15
+        , migrationFraction = 0.05
         }
 
 -- Maximum e-node count before compaction is triggered.
@@ -342,6 +352,12 @@ toExprUni cols SI.Square v = F.pow (toExpr cols v) 2
 toExprUni cols SI.Cube v = F.pow (toExpr cols v) 3
 toExprUni cols SI.Log v = log (toExpr cols v)
 toExprUni cols SI.Recip v = F.lit 1 / toExpr cols v
+toExprUni cols SI.Sqrt v = sqrt (toExpr cols v)
+toExprUni cols SI.Exp v = exp (toExpr cols v)
+toExprUni cols SI.Sin v = sin (toExpr cols v)
+toExprUni cols SI.Cos v = cos (toExpr cols v)
+toExprUni cols SI.Abs v = abs (toExpr cols v)
+toExprUni cols SI.SqrtAbs v = sqrt (abs (toExpr cols v))
 toExprUni _ treeOp _ = error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
 
 -- | Convert a binary SRTree operation to the equivalent DataFrame expression.
@@ -350,6 +366,8 @@ toExprBin cols SI.Add l r = toExpr cols l + toExpr cols r
 toExprBin cols SI.Sub l r = toExpr cols l - toExpr cols r
 toExprBin cols SI.Mul l r = toExpr cols l * toExpr cols r
 toExprBin cols SI.Div l r = toExpr cols l / toExpr cols r
+toExprBin cols SI.PowerAbs l r = abs (toExpr cols l) ** toExpr cols r
+toExprBin cols SI.Power l r = toExpr cols l ** toExpr cols r
 toExprBin _ treeOp _ _ = error ("UNIMPLEMENTED OPERATION: " ++ show treeOp)
 
 -- | Recursively convert a fixed-point SRTree to a DataFrame expression.
@@ -376,6 +394,10 @@ toNonTerminal e = case e of
         | otherwise = error ("Unsupported binary: " ++ name)
     handleUni name
         | name == "log" = "log"
+        | name == "sqrt" = "sqrt"
+        | name == "exp" = "exp"
+        | name == "sin" = "sin"
+        | name == "cos" = "cos"
         | otherwise = error ("Unsupported unary: " ++ name)
     handleDiv (Lit n :: Expr b) = case testEquality (typeRep @b) (typeRep @Double) of
         Nothing -> error "[Internal Error] - Reciprocal of non-double"
@@ -599,8 +621,11 @@ applyTournament env xs = do
     challengers <-
         replicateM (tournamentSize (envCfg env)) (rnd $ randomFrom xs)
             >>= traverse canonical
-    fits <- Prelude.map fromJust <$> Prelude.mapM getFitness challengers
-    pure . snd . maximumBy (compare `on` fst) $ Prelude.zip fits challengers
+    fits <- Prelude.mapM getFitness challengers
+    let rated = [(f, c) | (Just f, c) <- Prelude.zip fits challengers]
+    if null rated
+        then rnd $ randomFrom xs
+        else pure . snd . maximumBy (compare `on` fst) $ rated
 
 -- | Select two parents by running independent tournaments.
 tournament :: EGPEnv -> [EClassId] -> RndEGraph (EClassId, EClassId)
@@ -609,9 +634,80 @@ tournament env xs = do
     p2 <- applyTournament env xs >>= canonical
     pure (p1, p2)
 
--- | Apply crossover then mutation to a parent pair.
+-- | Apply a weighted random mutation operator to a parent pair.
+-- Weights mirror PySR's mutation distribution for structural diversity.
 combine :: EGPEnv -> (EClassId, EClassId) -> RndEGraph EClassId
-combine env (p1, p2) = crossover env p1 p2 >>= mutate env >>= canonical
+combine env (p1, p2) = do
+    r <- rnd $ randomRange (0 :: Int, 99)
+    let maxSz = maxExpressionSize (envCfg env)
+    result <- if
+          | r < 36 -> mutateOperator env p1
+          | r < 60 -> insertNode env p1 maxSz
+          | r < 74 -> rotateTree env p1
+          | r < 84 -> crossover env p1 p2
+          | r < 88 -> deleteNode env p1
+          | r < 92 -> pure p1
+          | r < 95 -> mutate env p1
+          | otherwise -> insertRndExpr maxSz (rndTerm env) (rndNonTerm env)
+    canonical result
+
+-- | Safely get the best expression for an e-class, or Nothing if it was cleaned.
+safeBestExpr :: EClassId -> RndEGraph (Maybe (Fix SRTree))
+safeBestExpr p = do
+    p' <- canonical p
+    exists <- gets (IM.member p' . _eClass)
+    if exists then Just <$> getBestExpr p' else pure Nothing
+
+-- | Replace a random operator with another of the same arity.
+mutateOperator :: EGPEnv -> EClassId -> RndEGraph EClassId
+mutateOperator env p = do
+    mt <- safeBestExpr p
+    case mt of
+        Nothing -> pure p
+        Just tree -> do
+            newUni <- rnd $ randomFrom (envUniNonTerms env)
+            newBin <- rnd $ randomFrom (envBinNonTerms env)
+            let tree' = mutOpInTree newUni newBin tree
+            fromTree myCost (envRelabel env tree') >>= canonical
+  where
+    mutOpInTree (Uni f' _) nb (Fix (Uni _ c)) = Fix (Uni f' c)
+    mutOpInTree nu (Bin op' _ _) (Fix (Bin _ l r)) = Fix (Bin op' l r)
+    mutOpInTree _ _ t = t
+
+-- | Insert a new unary operator wrapping the root.
+insertNode :: EGPEnv -> EClassId -> Int -> RndEGraph EClassId
+insertNode env p maxSz = do
+    sz <- getSize p
+    if sz >= maxSz
+        then pure p
+        else do
+            mt <- safeBestExpr p
+            case mt of
+                Nothing -> pure p
+                Just tree -> do
+                    newUni <- rnd $ randomFrom (envUniNonTerms env)
+                    let (Uni f _) = newUni
+                    fromTree myCost (envRelabel env (Fix (Uni f tree))) >>= canonical
+
+-- | Swap left and right children of the root binary node.
+rotateTree :: EGPEnv -> EClassId -> RndEGraph EClassId
+rotateTree env p = do
+    mt <- safeBestExpr p
+    case mt of
+        Nothing -> pure p
+        Just (Fix (Bin op l r)) ->
+            fromTree myCost (envRelabel env (Fix (Bin op r l))) >>= canonical
+        Just _ -> pure p
+
+-- | Remove the root operator (collapse unary, keep left of binary).
+deleteNode :: EGPEnv -> EClassId -> RndEGraph EClassId
+deleteNode env p = do
+    mt <- safeBestExpr p
+    case mt of
+        Nothing -> pure p
+        Just (Fix (Uni _ c)) -> fromTree myCost (envRelabel env c) >>= canonical
+        Just (Fix (Bin _ l _)) -> fromTree myCost (envRelabel env l) >>= canonical
+        Just _ -> pure p
 
 -- | Descend into the right child when the crossover position lies past the left subtree.
 getSubtreeBinRight ::
@@ -811,9 +907,10 @@ evolve env xs' = do
     xs <- Prelude.mapM canonical xs'
     parents' <- tournament env xs
     offspring <- combine env parents'
-    if numParams (envCfg env) == 0
-        then runEqSat myCost rewritesWithConstant 1 >> cleanDB >> refitChanged env
-        else runEqSat myCost rewritesParams 1 >> cleanDB >> refitChanged env
+    when (simplifyExpressions (envCfg env)) $
+        if numParams (envCfg env) == 0
+            then runEqSat myCost rewritesWithConstant 1 >> cleanDB >> refitChanged env
+            else runEqSat myCost rewritesParams 1 >> cleanDB >> refitChanged env
     canonical offspring >>= updateIfNothing (envFitFun env) >> pure ()
     canonical offspring
 
@@ -939,6 +1036,27 @@ paretoFront' env maxSize' = go 1 (-(1.0 / 0.0))
                             then canonical ec' >>= \ec -> tryImprove env ec f' f n go
                             else go (n + 1) (max f f')
 
+-- | Migrate best individuals between islands. Replace migrationFraction of each
+-- island with the best individuals from other islands.
+migrateIslands :: EGPEnv -> [[EClassId]] -> RndEGraph [[EClassId]]
+migrateIslands env islands = do
+    let nMigrate = max 1 $ round (migrationFraction (envCfg env) * fromIntegral (populationSize (envCfg env)))
+    -- Collect best from each island
+    bests <- forM islands $ \pop -> do
+        fits <- forM pop $ \ec -> do
+            mf <- getFitness ec
+            pure (fromMaybe (-1e18) mf, ec)
+        pure . Prelude.map snd . Prelude.take nMigrate . sortBy (comparing (Down . fst)) $ fits
+    -- For each island, replace worst with best from other islands
+    forM (Prelude.zip [0..] islands) $ \(i, pop) -> do
+        let migrants = concat [b | (j, b) <- Prelude.zip [0..] bests, j /= i]
+            nReplace = min nMigrate (length migrants)
+        if nReplace == 0 || null migrants
+            then pure pop
+            else do
+                selected <- replicateM nReplace (rnd $ randomFrom migrants) >>= Prelude.mapM canonical
+                pure $ selected ++ Prelude.drop nReplace pop
+
 egraphGP ::
     RegressionConfig ->
     String -> -- nonterminals
@@ -948,18 +1066,39 @@ egraphGP ::
     StateT EGraph (StateT StdGen IO) [Fix SRTree]
 egraphGP cfg nonterminals varnames dataTrainVals dataTests =
     let env = mkEGPEnv cfg nonterminals varnames dataTrainVals dataTests
+        nIslands = numIslands cfg
+        islandSize = max 10 (populationSize cfg `div` nIslands)
+        islandCfg = cfg { populationSize = islandSize }
+        islandEnv = env { envCfg = islandCfg }
      in do
             loadState env
             _ <- insertTerms env
             evaluateUnevaluated (envFitFun env)
             t0 <- io getPOSIXTime
-            pop <- initPopulation env >>= Prelude.mapM canonical
-            out <- tracePopulation env (Prelude.zip [0 ..] pop)
-            _ <-
+            -- Initialize islands
+            islands <- replicateM nIslands (initPopulation islandEnv >>= Prelude.mapM canonical)
+            out <- tracePopulation env (Prelude.zip [0 ..] (concat islands))
+            -- Run generations with migration
+            let runIslandGen _ (pops, o, ix) = do
+                    -- Evolve each island independently
+                    pops' <- forM pops $ \pop -> do
+                        newPop <- replicateM islandSize (evolve islandEnv pop)
+                        -- Compact if needed
+                        totSz <- gets (Map.size . _eNodeToEClass)
+                        let full = totSz > max maxMem islandSize
+                        when full (cleanEGraph islandEnv >> cleanDB)
+                        selectNewPop islandEnv full newPop
+                    -- Migrate between islands
+                    pops'' <- migrateIslands islandEnv pops'
+                    o' <- tracePopulation env (Prelude.zip [ix ..] (concat pops''))
+                    pure (pops'', o <> o', ix + islandSize * nIslands)
+            (finalIslands, _, _) <-
                 iterateFor
                     (generations cfg)
                     t0
                     (maxTimeMaybe env)
-                    (pop, out, populationSize cfg)
-                    (runGeneration env)
+                    (islands, out, islandSize * nIslands)
+                    runIslandGen
+            -- Merge all island results for Pareto extraction
+            _ <- Prelude.mapM canonical (concat finalIslands)
             saveState env >> paretoFront' env (maxExpressionSize cfg)

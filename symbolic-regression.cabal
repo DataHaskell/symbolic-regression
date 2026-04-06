@@ -20,8 +20,14 @@ common warnings
 library
     import:           warnings
     exposed-modules:  Symbolic.Regression
+                    , Symbolic.Regression.Language
+                    , Symbolic.Regression.Rewrites
+                    , Symbolic.Regression.EGraph
+                    , Symbolic.Regression.GP
+                    , Symbolic.Regression.Fitness
     build-depends:    base >= 4 && <5
-                    , dataframe >= 1.0.0.1 < 2,
+                    , hegg >= 0.6
+                    , dataframe >= 1.0.0.1 && < 2
                     , attoparsec >=0.14.4 && <0.15
                     , attoparsec-expr >=0.1.1.2 && <0.2
                     , binary >=0.8.9.1 && <0.9
@@ -54,6 +60,34 @@ library
     hs-source-dirs:   src
     default-language: Haskell2010
 
+executable sr-bench
+    import:           warnings
+    default-language: Haskell2010
+    hs-source-dirs:   bench
+    main-is:          Bench.hs
+    ghc-options:      -O2
+    build-depends:
+        base        >= 4 && <5,
+        symbolic-regression,
+        dataframe   >= 1.0.0.1 && < 2,
+        random      >= 1.2 && < 1.4,
+        time        >= 1.12 && < 2
+
+executable feynman-bench
+    import:           warnings
+    default-language: Haskell2010
+    hs-source-dirs:   bench
+    main-is:          Feynman.hs
+    ghc-options:      -O2
+    build-depends:
+        base        >= 4 && <5,
+        symbolic-regression,
+        dataframe   >= 1.0.0.1 && < 2,
+        random      >= 1.2 && < 1.4,
+        time        >= 1.12 && < 2,
+        directory   >= 1.3 && < 2,
+        process     >= 1.6 && < 2
+
 test-suite symbolic-regression-test
     import:           warnings
     default-language: Haskell2010
@@ -63,5 +97,5 @@ test-suite symbolic-regression-test
     build-depends:
         base        >= 4 && <5,
         symbolic-regression,
-        dataframe   >= 1.0.0.1 < 2,
+        dataframe   >= 1.0.0.1 && < 2,
         random      >= 1.2 && < 1.4

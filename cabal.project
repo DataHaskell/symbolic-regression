@@ -1,4 +1,8 @@
 packages: .
+
+-- Local hegg with normalizeNode A/C canonicalization
+optional-packages: /Users/mchavinda/code/hegg/hegg.cabal
+
 allow-newer: table-layout:*, haskeline:*, aeson:*,mwc-random:*
 allow-older: base
 

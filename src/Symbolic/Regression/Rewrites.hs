@@ -1,24 +1,21 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- | Algebraic rewrite rules for symbolic regression using hegg's API.
---
--- Commutativity rules are /omitted/ — they are handled structurally by
--- 'normalizeNode' in "Symbolic.Regression.Language".
-module Symbolic.Regression.Rewrites
-    ( srRewrites
-    ) where
 
-import Data.Equality.Graph
-import Data.Equality.Graph.Lens
+{- | Algebraic rewrite rules for symbolic regression using hegg's API.
+
+Commutativity rules are /omitted/ — they are handled structurally by
+'normalizeNode' in "Symbolic.Regression.Language".
+-}
+module Symbolic.Regression.Rewrites (
+    srRewrites,
+) where
+
 import Data.Equality.Matching
-import Data.Equality.Matching.Database (Subst, findSubst)
 import Data.Equality.Saturation.Rewrites
 
-import Symbolic.Regression.Expr (ExprF(..), BinOp(..), UnOp(..))
-import Symbolic.Regression.Language (SRAnalysis(..), SRConst(..))
+import Symbolic.Regression.Expr (BinOp (..), ExprF (..), UnOp (..))
+import Symbolic.Regression.Language (SRAnalysis (..))
 
 -- | Pattern variables
 x, y, z :: Pattern ExprF
@@ -42,16 +39,18 @@ pPow a b = p (BinF Pow a b)
 pLit :: Double -> Pattern ExprF
 pLit v = p (LitF v)
 
-pLog, pExp, pRecip, pSqrt, pSq, pAbs :: Pattern ExprF -> Pattern ExprF
-pLog   a = p (UnF Log a)
-pExp   a = p (UnF Exp a)
+pNeg, pLog, pExp, pRecip, pSqrt, pSq, pAbs :: Pattern ExprF -> Pattern ExprF
+pNeg a = p (UnF Neg a)
+pLog a = p (UnF Log a)
+pExp a = p (UnF Exp a)
 pRecip a = p (UnF Recip a)
-pSqrt  a = p (UnF Sqrt a)
-pSq    a = p (UnF Sq a)
-pAbs   a = p (UnF Abs a)
+pSqrt a = p (UnF Sqrt a)
+pSq a = p (UnF Sq a)
+pAbs a = p (UnF Abs a)
 
--- | All rewrite rules for symbolic regression.
--- Commutativity of Add and Mul is handled by 'normalizeNode', not here.
+{- | All rewrite rules for symbolic regression.
+Commutativity of Add and Mul is handled by 'normalizeNode', not here.
+-}
 srRewrites :: [Rewrite SRAnalysis ExprF]
 srRewrites = identityRules ++ algebraicRules ++ functionRules
 
@@ -78,8 +77,9 @@ algebraicRules =
     [ -- Distributivity (genuinely useful — not structural)
       pMul x (pAdd y z) := pAdd (pMul x y) (pMul x z)
     , pAdd (pMul x y) (pMul x z) := pMul x (pAdd y z)
-      -- Power rules
-    , pMul x x := pSq x
+    , -- Power rules
+      pMul x x := pSq x
+    , pSq (pNeg x) := pSq x
     , pSq (pSqrt x) := x
     ]
 

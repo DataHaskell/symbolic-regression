@@ -24,12 +24,17 @@ library
                     , Symbolic.Regression.Expr.Utils
                     , Symbolic.Regression.Expr.Eval
                     , Symbolic.Regression.Expr.Opt
+                    , Symbolic.Regression.Expr.NLOPT
                     , Symbolic.Regression.Expr.Print
                     , Symbolic.Regression.Language
                     , Symbolic.Regression.Rewrites
                     , Symbolic.Regression.EGraph
                     , Symbolic.Regression.GP
                     , Symbolic.Regression.Fitness
+                    , Numeric.Optimization.NLOPT.Bindings
+    extra-libraries:  nlopt
+    include-dirs:     /opt/homebrew/opt/nlopt/include
+    extra-lib-dirs:   /opt/homebrew/opt/nlopt/lib
     build-depends:    base >= 4 && <5
                     , hegg >= 0.6
                     , dataframe >= 1.0.0.1 && < 2
@@ -78,6 +83,19 @@ test-suite symbolic-regression-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Main.hs
+    build-depends:
+        base        >= 4 && <5,
+        symbolic-regression,
+        dataframe   >= 1.0.0.1 && < 2,
+        random      >= 1.2 && < 1.4,
+        vector      >= 0.12 && < 0.14
+
+executable profile-linear
+    import:           warnings
+    default-language: Haskell2010
+    hs-source-dirs:   bench
+    main-is:          ProfileLinear.hs
+    ghc-options:      -O2 -rtsopts -fprof-auto
     build-depends:
         base        >= 4 && <5,
         symbolic-regression,

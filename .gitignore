@@ -27,3 +27,5 @@ bin/
 coverage-html
 .DS_Store
 flake.lock
+.venv*
+outputs

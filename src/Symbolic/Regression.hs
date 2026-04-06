@@ -1,13 +1,13 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ExplicitNamespaces #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE LambdaCase #-}
 
 {- |
 Module      : Symbolic.Regression
@@ -61,14 +61,15 @@ module Symbolic.Regression (
 
 import Control.Exception (throw)
 import Control.Monad.State.Strict
+import Data.IORef
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 import qualified DataFrame as D
 import qualified DataFrame.Functions as F
 import DataFrame.Internal.Expression
+import DataFrame.Operations.Core (columnAsUnboxedVector)
 import System.Random
-import Data.IORef
 
 import Control.Monad (
     foldM,
@@ -83,12 +84,13 @@ import qualified Data.IntMap.Strict as IM
 import Data.List (
     intercalate,
     maximumBy,
+    nubBy,
     sortBy,
     zip4,
  )
-import Data.Ord (Down(..), comparing)
 import Data.List.Split (splitOn)
 import Data.Maybe (fromJust, fromMaybe, isNothing)
+import Data.Ord (Down (..), comparing)
 import Data.Type.Equality (TestEquality (testEquality), type (:~:) (Refl))
 import Type.Reflection (typeRep)
 
@@ -96,14 +98,29 @@ import Data.Time.Clock (NominalDiffTime)
 import Data.Time.Clock.POSIX
 
 -- Internal modules (hegg-based)
-import Symbolic.Regression.Expr
-import Symbolic.Regression.Expr.Utils
-import Symbolic.Regression.Expr.Eval (evalTree)
-import Symbolic.Regression.Expr.Opt (Distribution(..), nll, r2, fractionalBayesFactor, minimizeNLL)
-import Symbolic.Regression.Expr.Print (showExpr, showExprWithVars, showPython, showLatex, showLatexWithVars)
-import Symbolic.Regression.Language ()  -- instances only
-import Symbolic.Regression.Rewrites ()  -- instances only
+
+-- instances only
+-- instances only
 import Symbolic.Regression.EGraph
+import Symbolic.Regression.Expr
+import Symbolic.Regression.Expr.Eval (evalTree)
+import Symbolic.Regression.Expr.Opt (
+    Distribution (..),
+    fractionalBayesFactor,
+    minimizeNLL,
+    nll,
+    r2,
+ )
+import Symbolic.Regression.Expr.Print (
+    showExpr,
+    showExprWithVars,
+    showLatex,
+    showLatexWithVars,
+    showPython,
+ )
+import Symbolic.Regression.Expr.Utils
+import Symbolic.Regression.Language ()
+import Symbolic.Regression.Rewrites ()
 
 {- | Configuration for the symbolic regression algorithm.
 
@@ -163,6 +180,12 @@ data RegressionConfig = RegressionConfig
     -- ^ Number of independent sub-populations (island model). (default: 15)
     , migrationFraction :: Double
     -- ^ Fraction of each island replaced by migrants each generation. (default: 0.05)
+    , ncyclesPerIteration :: Int
+    -- ^ Mutation cycles per population member per generation. Higher = more search. (default: 30)
+    , optimizeProbability :: Double
+    -- ^ Probability of running NLOPT parameter optimization per offspring. (default: 0.14)
+    , warmupMaxsizeBy :: Double
+    -- ^ Fraction of generations to gradually ramp up maxExpressionSize. 0 = no warmup. (default: 0.5)
     }
 
 data ValidationConfig = ValidationConfig
@@ -244,31 +267,32 @@ rnd = lift
 -- | Parse a comma-separated string of operator names into ExprF templates.
 parseNonTerms :: String -> [ExprF ()]
 parseNonTerms s =
-    [ parseOne tok | tok <- splitOn "," s, not (null tok) ]
+    [parseOne tok | tok <- splitOn "," s, not (null tok)]
   where
-    parseOne "add"    = BinF Add () ()
-    parseOne "sub"    = BinF Sub () ()
-    parseOne "mul"    = BinF Mul () ()
-    parseOne "div"    = BinF Div () ()
-    parseOne "pow"    = BinF Pow () ()
+    parseOne "add" = BinF Add () ()
+    parseOne "sub" = BinF Sub () ()
+    parseOne "mul" = BinF Mul () ()
+    parseOne "div" = BinF Div () ()
+    parseOne "pow" = BinF Pow () ()
     parseOne "square" = UnF Sq ()
-    parseOne "cube"   = UnF Cube ()
-    parseOne "log"    = UnF Log ()
-    parseOne "recip"  = UnF Recip ()
-    parseOne "sqrt"   = UnF Sqrt ()
-    parseOne "exp"    = UnF Exp ()
-    parseOne "sin"    = UnF Sin ()
-    parseOne "cos"    = UnF Cos ()
-    parseOne "abs"    = UnF Abs ()
-    parseOne "neg"    = UnF Neg ()
-    parseOne name     = error ("parseNonTerms: unknown operator: " ++ name)
+    parseOne "cube" = UnF Cube ()
+    parseOne "log" = UnF Log ()
+    parseOne "recip" = UnF Recip ()
+    parseOne "sqrt" = UnF Sqrt ()
+    parseOne "exp" = UnF Exp ()
+    parseOne "sin" = UnF Sin ()
+    parseOne "cos" = UnF Cos ()
+    parseOne "abs" = UnF Abs ()
+    parseOne "neg" = UnF Neg ()
+    parseOne name = error ("parseNonTerms: unknown operator: " ++ name)
 
 ------------------------------------------------------------------------
 -- Shared environment
 ------------------------------------------------------------------------
 
--- | Cache of extracted best expressions, keyed by canonical ClassId.
--- Invalidated after saturation or graph compaction.
+{- | Cache of extracted best expressions, keyed by canonical ClassId.
+Invalidated after saturation or graph compaction.
+-}
 type ExprCache = IORef (IM.IntMap (Fix ExprF))
 
 -- | Shared environment threaded through all egraphGP helpers.
@@ -285,7 +309,8 @@ data EGPEnv = EGPEnv
     , envVarnames :: String
     , envDataTrainVals :: [(OldDataSet, OldDataSet)]
     , envDataTests :: [OldDataSet]
-    , envExprCache :: !ExprCache  -- ^ Extraction cache
+    , envExprCache :: !ExprCache
+    -- ^ Extraction cache
     }
 
 {- | Default configuration for symbolic regression.
@@ -324,6 +349,9 @@ defaultRegressionConfig =
         , loadFrom = ""
         , numIslands = 15
         , migrationFraction = 0.05
+        , ncyclesPerIteration = 30
+        , optimizeProbability = 0.14
+        , warmupMaxsizeBy = 0.5
         }
 
 -- Maximum e-node count before compaction is triggered.
@@ -422,8 +450,8 @@ fit ::
 fit g cfg targetColumn df =
     let (train, validation) = splitTrainVal cfg df
         cols = doubleFeatureCols targetColumn train
-        fm d = toFeatureMatrix targetColumn d
-        tgt d = VU.fromList (D.columnAsList targetColumn d)
+        fm = toFeatureMatrix targetColumn
+        tgt d = either throw id (columnAsUnboxedVector targetColumn d)
         nts = buildNonterminals cfg
         vars = buildVarnames cols
         alg =
@@ -436,20 +464,40 @@ fit g cfg targetColumn df =
                     [(fm df, tgt df, Nothing)]
                 )
                 emptySREGraph
-     in fmap (Prelude.map (toExpr cols)) (evalStateT alg g)
+        -- After conversion, filter Pareto front to strictly improving MSE
+        filterPareto :: [D.Expr Double] -> [D.Expr Double]
+        filterPareto exprs =
+            let actual = either throw id (columnAsUnboxedVector targetColumn df)
+                evalMSE e =
+                    let pred' = either throw id (columnAsUnboxedVector e df)
+                     in VU.sum (VU.zipWith (\a b -> let d = a - b in d * d) pred' actual)
+                            / fromIntegral (VU.length actual)
+                go _ [] = []
+                go bestMSE (e : es) =
+                    let m = evalMSE e
+                     in if m < bestMSE then e : go m es else go bestMSE es
+             in case exprs of
+                    [] -> []
+                    (e : es) -> e : go (evalMSE e) es
+     in fmap
+            ( filterPareto
+                . Prelude.map (toExpr cols)
+                . nubBy (\a b -> showExpr a == showExpr b)
+            )
+            (evalStateT alg g)
 
 -- | Convert a unary ExprF operation to the equivalent DataFrame expression.
 toExprUni :: [T.Text] -> UnOp -> Fix ExprF -> Expr Double
-toExprUni cols Sq v    = F.pow (toExpr cols v) 2
-toExprUni cols Cube v  = F.pow (toExpr cols v) 3
-toExprUni cols Log v   = log (toExpr cols v)
+toExprUni cols Sq v = F.pow (toExpr cols v) 2
+toExprUni cols Cube v = F.pow (toExpr cols v) 3
+toExprUni cols Log v = log (toExpr cols v)
 toExprUni cols Recip v = F.lit 1 / toExpr cols v
-toExprUni cols Sqrt v  = sqrt (toExpr cols v)
-toExprUni cols Exp v   = exp (toExpr cols v)
-toExprUni cols Sin v   = sin (toExpr cols v)
-toExprUni cols Cos v   = cos (toExpr cols v)
-toExprUni cols Abs v   = abs (toExpr cols v)
-toExprUni cols Neg v   = negate (toExpr cols v)
+toExprUni cols Sqrt v = sqrt (toExpr cols v)
+toExprUni cols Exp v = exp (toExpr cols v)
+toExprUni cols Sin v = sin (toExpr cols v)
+toExprUni cols Cos v = cos (toExpr cols v)
+toExprUni cols Abs v = abs (toExpr cols v)
+toExprUni cols Neg v = negate (toExpr cols v)
 
 -- | Convert a binary ExprF operation to the equivalent DataFrame expression.
 toExprBin :: [T.Text] -> BinOp -> Fix ExprF -> Fix ExprF -> Expr Double
@@ -461,11 +509,15 @@ toExprBin cols Pow l r = toExpr cols l ** toExpr cols r
 
 -- | Recursively convert a fixed-point ExprF to a DataFrame expression.
 toExpr :: [T.Text] -> Fix ExprF -> Expr Double
-toExpr _    (Fix (LitF v))      = Lit v
-toExpr cols (Fix (VarF ix))     = Col (cols !! ix)
-toExpr _    (Fix (ParamF _))    = Lit 0  -- params should be substituted before calling
-toExpr cols (Fix (UnF f v))     = toExprUni cols f v
+toExpr _ (Fix (LitF v)) = Lit v
+toExpr cols (Fix (VarF ix)) = Col (cols !! ix)
+toExpr _ (Fix (ParamF _)) = Lit 0 -- params should be substituted before calling
+toExpr cols (Fix (UnF f v)) = toExprUni cols f v
 toExpr cols (Fix (BinF op l r)) = toExprBin cols op l r
+toExpr _ (Fix (SumF [])) = Lit 0
+toExpr cols (Fix (SumF xs)) = sum (map (toExpr cols) xs)
+toExpr _ (Fix (ProdF [])) = Lit 1
+toExpr cols (Fix (ProdF xs)) = product (map (toExpr cols) xs)
 
 -- | Map a DataFrame expression node to its e-graph non-terminal name (e.g. "add", "square").
 toNonTerminal :: D.Expr Double -> String
@@ -523,42 +575,53 @@ fitnessMV shouldReparam nRetries nIter dist dataTrainVals tree' = do
             let results = flip Prelude.map dataTrainVals $ \(dtrain, _dval) ->
                     let yHat = evalTree (getX dtrain) VU.empty tree
                         loss = computeLoss dist yHat (getY dtrain)
-                    in (loss, VU.empty)
-                avgLoss = sum (Prelude.map fst results) / fromIntegral (length results)
+                     in (loss, VU.empty)
+                !avgLoss = foldl' (\(!acc) (f, _) -> acc + f) 0 results / fromIntegral (length results)
                 fit' = if isNaN avgLoss || isInfinite avgLoss then -1e18 else negate avgLoss
             pure (fit', Prelude.map snd results)
         else do
             results <- forM dataTrainVals $ \(dtrain, _dval) -> do
                 let theta0s = replicate nRetries (VU.replicate nParams' 1.0)
-                bestResult <- foldM (\(!bestF, !bestTh) th0 -> do
-                    g <- rnd get
-                    let (!rndTh, !g') = randomTheta nParams' g
-                    rnd (put g')
-                    let th = if VU.null th0 then rndTh else th0
-                        (!thetaOpt, !loss, _) = minimizeNLL dist (getYErr dtrain) nIter
-                            (getX dtrain) (getY dtrain) tree th
-                        !fit' = if isNaN loss || isInfinite loss then -1e18 else negate loss
-                    pure $ if fit' > bestF then (fit', thetaOpt) else (bestF, bestTh)
-                    ) (-1e18, VU.empty) theta0s
-                pure bestResult
-            let avgFit = sum (Prelude.map fst results) / fromIntegral (length results)
+                foldM
+                    ( \(!bestF, !bestTh) th0 -> do
+                        g <- rnd get
+                        let (!rndTh, !g') = randomTheta nParams' g
+                        rnd (put g')
+                        let th = if VU.null th0 then rndTh else th0
+                            (!thetaOpt, !loss, _) =
+                                minimizeNLL
+                                    dist
+                                    (getYErr dtrain)
+                                    nIter
+                                    (getX dtrain)
+                                    (getY dtrain)
+                                    tree
+                                    th
+                            !fit' = if isNaN loss || isInfinite loss then -1e18 else negate loss
+                        pure $ if fit' > bestF then (fit', thetaOpt) else (bestF, bestTh)
+                    )
+                    (-1e18, VU.empty)
+                    theta0s
+            let !avgFit = foldl' (\(!acc) (f, _) -> acc + f) 0 results / fromIntegral (length results)
             pure (avgFit, Prelude.map snd results)
   where
     randomTheta :: Int -> StdGen -> (PVector, StdGen)
-    randomTheta n g = go n g []
+    randomTheta n g0 =
+        let (!lst, !gFinal) = go n g0
+         in (VU.fromListN n lst, gFinal)
       where
-        go :: Int -> StdGen -> [Double] -> (PVector, StdGen)
-        go 0 g' acc = (VU.fromList (reverse acc), g')
-        go k g' acc =
-            let (v, g'') = randomR (-1.0 :: Double, 1.0) g'
-            in go (k-1) g'' (v : acc)
+        go 0 !g = ([], g)
+        go !k !g =
+            let (!v, !g') = randomR (-1.0 :: Double, 1.0) g
+                (!rest, !gF) = go (k - 1) g'
+             in (v : rest, gF)
 
 -- | Simple MSE loss computation.
 computeLoss :: Distribution -> PVector -> PVector -> Double
 computeLoss MSE yHat yTrue =
     let n = VU.length yTrue
         s = VU.sum (VU.zipWith (\a b -> (a - b) ** 2) yTrue yHat)
-    in s / fromIntegral n
+     in s / fromIntegral n
 computeLoss _ yHat yTrue = computeLoss MSE yHat yTrue
 
 ------------------------------------------------------------------------
@@ -602,7 +665,7 @@ mkEnvTerminals cfg dataTrainVals =
             [] -> 0
             (h : _) ->
                 let xss = getX (fst h)
-                in if V.null xss then 0 else VU.length (xss V.! 0)
+                 in if V.null xss then 0 else VU.length (xss V.! 0)
         ps =
             if numParams cfg == -1
                 then [param 0]
@@ -671,7 +734,7 @@ cachedExtract cacheRef cid' = do
     cid <- canonicalM cid'
     cache <- liftIO (readIORef cacheRef)
     case IM.lookup cid cache of
-        Just e  -> pure e
+        Just e -> pure e
         Nothing -> do
             e <- getBestExprM cid
             liftIO $ modifyIORef' cacheRef (IM.insert cid e)
@@ -700,7 +763,7 @@ getTopFitEClassWithSize sz k = gets (getTopFitWithSize sz k)
 -- | Get the top-k e-classes that satisfy a predicate.
 getTopFitEClassThat :: Int -> (ClassId -> Bool) -> RndEGraph [(ClassId, Double)]
 getTopFitEClassThat k _predicate = do
-    results <- gets (getTopFit (k * 10))  -- get more and filter
+    results <- gets (getTopFit (k * 10)) -- get more and filter
     pure $ take k results
 
 -- | Get all class IDs.
@@ -729,21 +792,30 @@ evaluateUnevaluated cache fitFun = do
         (f, theta) <- fitFun tree
         insertFitnessM cid f theta
 
--- | Run equality saturation on the current e-graph.
--- Clears the extraction cache since merges invalidate class identities.
+{- | Run equality saturation on the current e-graph.
+Clears the extraction cache since merges invalidate class identities.
+-}
 runSaturationM :: ExprCache -> RndEGraph ()
 runSaturationM cache = do
     modify' runSaturation
     clearExprCache cache
 
 -- | Insert a random expression into the e-graph.
-insertRndExpr :: Int -> StateT StdGen IO (Fix ExprF) -> StateT StdGen IO (ExprF ()) -> RndEGraph ClassId
+insertRndExpr ::
+    Int ->
+    StateT StdGen IO (Fix ExprF) ->
+    StateT StdGen IO (ExprF ()) ->
+    RndEGraph ClassId
 insertRndExpr maxSz rndT rndNT = do
     tree <- rnd $ buildRandomTree maxSz rndT rndNT
     insertTreeM tree
 
 -- | Build a random expression tree.
-buildRandomTree :: Int -> StateT StdGen IO (Fix ExprF) -> StateT StdGen IO (ExprF ()) -> StateT StdGen IO (Fix ExprF)
+buildRandomTree ::
+    Int ->
+    StateT StdGen IO (Fix ExprF) ->
+    StateT StdGen IO (ExprF ()) ->
+    StateT StdGen IO (Fix ExprF)
 buildRandomTree maxSz rndT rndNT
     | maxSz <= 1 = rndT
     | otherwise = do
@@ -763,13 +835,25 @@ buildRandomTree maxSz rndT rndNT
                         pure $ Fix (UnF f c)
                     _ -> rndT
 
--- | Simplify an expression using equality saturation in a temporary e-graph.
+{- | Simplify an expression using equality saturation in a temporary e-graph.
+Uses 1 iteration (fast, for in-evolution use).
+-}
 simplifyEqSatDefault :: Fix ExprF -> Fix ExprF
 simplifyEqSatDefault expr =
     let eg0 = emptySREGraph
         (!cid, !eg1) = insertTree expr eg0
         !eg2 = runSaturation eg1
-    in getBestExpr cid eg2
+     in getBestExpr cid eg2
+
+{- | Deeper simplification for final output: multiple saturation passes
+to fully canonicalize (identity elimination, constant folding, etc.).
+-}
+simplifyDeep :: Fix ExprF -> Fix ExprF
+simplifyDeep expr =
+    let eg0 = emptySREGraph
+        (!cid, !eg1) = insertTree expr eg0
+        !eg2 = runSaturationN 5 eg1
+     in getBestExpr cid eg2
 
 -- | Get the best expression for each size tier.
 getBestExprWithSize :: Int -> RndEGraph [(ClassId, Maybe Double)]
@@ -829,9 +913,10 @@ rndTerm env = do
 rndNonTerm :: EGPEnv -> StateT StdGen IO (ExprF ())
 rndNonTerm env = randomFrom (envNonTerms env)
 
--- | Re-evaluate fitness for classes that may have changed.
--- With hegg, rebuild handles structural invariants; we just re-fit all classes
--- that don't have fitness yet.
+{- | Re-evaluate fitness for classes that may have changed.
+With hegg, rebuild handles structural invariants; we just re-fit all classes
+that don't have fitness yet.
+-}
 refitChanged :: EGPEnv -> RndEGraph ()
 refitChanged env = do
     ids <- getAllClassIdsM
@@ -880,7 +965,7 @@ cleanEGraph env = do
     io . putStrLn $ "cleaning"
     pareto <-
         forM [1 .. maxExpressionSize (envCfg env)] (`getTopFitEClassWithSize` 10)
-            >>= Prelude.mapM canonicalM . Prelude.map fst . concat
+            >>= (mapM (canonicalM . fst) . concat)
     fitnesses <- forM pareto $ \c -> do
         mf <- getFitnessM c
         mth <- gets (getTheta c)
@@ -920,21 +1005,29 @@ tournament env xs = do
 -- Mutation operators
 ------------------------------------------------------------------------
 
--- | Apply a weighted random mutation operator to a parent pair.
--- Weights mirror PySR's mutation distribution for structural diversity.
+{- | Apply a weighted random mutation operator to a parent pair.
+Weights mirror PySR's mutation distribution for structural diversity.
+-}
 combine :: EGPEnv -> (ClassId, ClassId) -> RndEGraph ClassId
 combine env (p1, p2) = do
     r <- rnd $ randomRange (0 :: Int, 99)
     let maxSz = maxExpressionSize (envCfg env)
-    result <- if
-          | r < 36 -> mutateOperator env p1
-          | r < 60 -> insertNode env p1 maxSz
-          | r < 74 -> rotateTree env p1
-          | r < 84 -> crossover env p1 p2
-          | r < 88 -> deleteNode env p1
-          | r < 92 -> pure p1
-          | r < 95 -> mutate env p1
-          | otherwise -> insertRndExpr maxSz (rndTerm env) (rndNonTerm env)
+    result <-
+        if
+            | r < 15 -> addTerm env p1
+            | r < 25 -> replaceTerm env p1
+            | r < 32 -> removeTerm env p1
+            | r < 42 -> mutateOperator env p1
+            | r < 52 -> rotateTree env p1
+            | r < 58 -> crossover env p1 p2
+            | r < 65 -> insertNode env p1 maxSz
+            | r < 72 -> mutateFeature env p1
+            | r < 77 -> deleteNode env p1
+            | r < 82 -> prependParam env p1
+            | r < 87 -> mutateConstant env p1
+            | r < 92 -> pure p1
+            | r < 97 -> mutate env p1
+            | otherwise -> insertRndExpr maxSz (rndTerm env) (rndNonTerm env)
     canonicalM result
 
 -- | Safely get the best expression for an e-class, or Nothing if it was cleaned.
@@ -951,11 +1044,21 @@ modifyAtPos :: Int -> (Fix ExprF -> Fix ExprF) -> Fix ExprF -> Fix ExprF
 modifyAtPos 0 f t = f t
 modifyAtPos n f (Fix (BinF op l r)) =
     let lSz = countNodes l
-    in if n - 1 < lSz
-       then Fix (BinF op (modifyAtPos (n-1) f l) r)
-       else Fix (BinF op l (modifyAtPos (n-1-lSz) f r))
-modifyAtPos n f (Fix (UnF g c)) = Fix (UnF g (modifyAtPos (n-1) f c))
+     in if n - 1 < lSz
+            then Fix (BinF op (modifyAtPos (n - 1) f l) r)
+            else Fix (BinF op l (modifyAtPos (n - 1 - lSz) f r))
+modifyAtPos n f (Fix (UnF g c)) = Fix (UnF g (modifyAtPos (n - 1) f c))
+modifyAtPos n f (Fix (SumF xs)) = Fix (SumF (modifyInList (n - 1) f xs))
+modifyAtPos n f (Fix (ProdF xs)) = Fix (ProdF (modifyInList (n - 1) f xs))
 modifyAtPos _ _ t = t
+
+modifyInList :: Int -> (Fix ExprF -> Fix ExprF) -> [Fix ExprF] -> [Fix ExprF]
+modifyInList _ _ [] = []
+modifyInList n f (x : xs)
+    | n < xSz = modifyAtPos n f x : xs
+    | otherwise = x : modifyInList (n - xSz) f xs
+  where
+    xSz = countNodes x
 
 -- | Apply a tree mutation at a random position, safely handling cleaned classes.
 deepMutate :: EGPEnv -> ClassId -> (Fix ExprF -> Fix ExprF) -> RndEGraph ClassId
@@ -974,8 +1077,8 @@ mutateOperator :: EGPEnv -> ClassId -> RndEGraph ClassId
 mutateOperator env p = do
     newUni <- rnd $ randomFrom (envUniNonTerms env)
     newBin <- rnd $ randomFrom (envBinNonTerms env)
-    let swapOp (Fix (UnF _ c)) = case newUni of { UnF f' _ -> Fix (UnF f' c); _ -> Fix (UnF Sq c) }
-        swapOp (Fix (BinF _ l r)) = case newBin of { BinF op' _ _ -> Fix (BinF op' l r); _ -> Fix (BinF Add l r) }
+    let swapOp (Fix (UnF _ c)) = case newUni of UnF f' _ -> Fix (UnF f' c); _ -> Fix (UnF Sq c)
+        swapOp (Fix (BinF _ l r)) = case newBin of BinF op' _ _ -> Fix (BinF op' l r); _ -> Fix (BinF Add l r)
         swapOp t = t
     deepMutate env p swapOp
 
@@ -983,19 +1086,20 @@ mutateOperator env p = do
 insertNode :: EGPEnv -> ClassId -> Int -> RndEGraph ClassId
 insertNode env p maxSz = do
     sz <- getSizeM p
-    if sz >= maxSz then pure p
-    else do
-        newUni <- rnd $ randomFrom (envUniNonTerms env)
-        let f = case newUni of { UnF f' _ -> f'; _ -> Sq }
-            wrap t = Fix (UnF f t)
-        deepMutate env p wrap
+    if sz >= maxSz
+        then pure p
+        else do
+            newUni <- rnd $ randomFrom (envUniNonTerms env)
+            let f = case newUni of UnF f' _ -> f'; _ -> Sq
+                wrap t = Fix (UnF f t)
+            deepMutate env p wrap
 
 -- | Swap children of a random binary node.
 rotateTree :: EGPEnv -> ClassId -> RndEGraph ClassId
 rotateTree env p =
     let swapKids (Fix (BinF op l r)) = Fix (BinF op r l)
         swapKids t = t
-    in deepMutate env p swapKids
+     in deepMutate env p swapKids
 
 -- | Remove a random operator (collapse unary, keep left of binary).
 deleteNode :: EGPEnv -> ClassId -> RndEGraph ClassId
@@ -1003,7 +1107,80 @@ deleteNode env p =
     let collapse (Fix (UnF _ c)) = c
         collapse (Fix (BinF _ l _)) = l
         collapse t = t
-    in deepMutate env p collapse
+     in deepMutate env p collapse
+
+{- | Wrap expression in @param OP expr@ where OP is Add or Mul.
+Enables discovering linear offsets (param + expr) and scaling (param * expr).
+-}
+prependParam :: EGPEnv -> ClassId -> RndEGraph ClassId
+prependParam env p = do
+    sz <- getSizeM p
+    let maxSz = maxExpressionSize (envCfg env)
+    if sz + 2 > maxSz
+        then pure p
+        else do
+            tree <- cachedExtract (envExprCache env) p
+            op <- rnd $ randomFrom [Add, Mul]
+            let newTree = Fix (BinF op (param 0) tree)
+            insertTreeM (envRelabel env newTree) >>= canonicalM
+
+-- | Swap which variable a VarF references.
+mutateFeature :: EGPEnv -> ClassId -> RndEGraph ClassId
+mutateFeature env p = do
+    let nFeats = length (envTerms env) -- number of variable terminals
+    if nFeats <= 1
+        then pure p
+        else do
+            newIdx <- rnd $ randomRange (0, nFeats - 1)
+            deepMutate env p $ \case
+                Fix (VarF _) -> Fix (VarF newIdx)
+                t -> t
+
+-- | Perturb a literal slightly.
+mutateConstant :: EGPEnv -> ClassId -> RndEGraph ClassId
+mutateConstant env p = do
+    noise <- rnd $ randomRange (-1.0 :: Double, 1.0)
+    deepMutate env p $ \case
+        Fix (LitF x) -> Fix (LitF (x + noise * (abs x * 0.1 + 0.01)))
+        t -> t
+
+-- | Add a random terminal to a SumF or ProdF node.
+addTerm :: EGPEnv -> ClassId -> RndEGraph ClassId
+addTerm env p = do
+    newT <- rnd (rndTerm env)
+    deepMutate env p $ \case
+        Fix (SumF xs) -> Fix (SumF (newT : xs))
+        Fix (ProdF xs) -> Fix (ProdF (newT : xs))
+        t -> t
+
+-- | Remove a random child from a SumF or ProdF (if 3+ children).
+removeTerm :: EGPEnv -> ClassId -> RndEGraph ClassId
+removeTerm env p = do
+    idx <- rnd $ randomRange (0 :: Int, 100)
+    deepMutate env p $ \case
+        Fix (SumF xs)
+            | length xs >= 3 ->
+                Fix (SumF (take (idx `mod` length xs) xs ++ drop (idx `mod` length xs + 1) xs))
+        Fix (ProdF xs)
+            | length xs >= 3 ->
+                Fix (ProdF (take (idx `mod` length xs) xs ++ drop (idx `mod` length xs + 1) xs))
+        t -> t
+
+-- | Replace a random child in a SumF or ProdF with a new terminal.
+replaceTerm :: EGPEnv -> ClassId -> RndEGraph ClassId
+replaceTerm env p = do
+    newT <- rnd (rndTerm env)
+    idx <- rnd $ randomRange (0 :: Int, 100)
+    deepMutate env p $ \case
+        Fix (SumF xs)
+            | not (null xs) ->
+                let i = idx `mod` length xs
+                 in Fix (SumF (take i xs ++ [newT] ++ drop (i + 1) xs))
+        Fix (ProdF xs)
+            | not (null xs) ->
+                let i = idx `mod` length xs
+                 in Fix (ProdF (take i xs ++ [newT] ++ drop (i + 1) xs))
+        t -> t
 
 ------------------------------------------------------------------------
 -- Crossover (simplified tree-based approach)
@@ -1016,8 +1193,7 @@ crossover env p1 p2 = do
     coin <- rnd $ tossBiased (crossoverProbability (envCfg env))
     if sz <= 1 || not coin
         then do
-            choice <- rnd $ randomFrom [p1, p2]
-            pure choice
+            rnd $ randomFrom [p1, p2]
         else do
             tree1 <- cachedExtract (envExprCache env) p1
             tree2 <- cachedExtract (envExprCache env) p2
@@ -1035,9 +1211,19 @@ getSubAt 0 t = t
 getSubAt n (Fix node) = case node of
     BinF _ l r ->
         let lSz = countNodes l
-        in if n - 1 < lSz then getSubAt (n-1) l else getSubAt (n-1-lSz) r
-    UnF _ c -> getSubAt (n-1) c
+         in if n - 1 < lSz then getSubAt (n - 1) l else getSubAt (n - 1 - lSz) r
+    UnF _ c -> getSubAt (n - 1) c
+    SumF xs -> getInList (n - 1) xs
+    ProdF xs -> getInList (n - 1) xs
     _ -> Fix node
+
+getInList :: Int -> [Fix ExprF] -> Fix ExprF
+getInList _ [] = Fix (LitF 0)
+getInList n (x : xs)
+    | n < xSz = getSubAt n x
+    | otherwise = getInList (n - xSz) xs
+  where
+    xSz = countNodes x
 
 -- | Replace the subtree at a given position (preorder).
 replaceSubAt :: Int -> Fix ExprF -> Fix ExprF -> Fix ExprF
@@ -1045,11 +1231,21 @@ replaceSubAt 0 replacement _ = replacement
 replaceSubAt n replacement (Fix node) = case node of
     BinF op l r ->
         let lSz = countNodes l
-        in if n - 1 < lSz
-           then Fix (BinF op (replaceSubAt (n-1) replacement l) r)
-           else Fix (BinF op l (replaceSubAt (n-1-lSz) replacement r))
-    UnF f c -> Fix (UnF f (replaceSubAt (n-1) replacement c))
+         in if n - 1 < lSz
+                then Fix (BinF op (replaceSubAt (n - 1) replacement l) r)
+                else Fix (BinF op l (replaceSubAt (n - 1 - lSz) replacement r))
+    UnF f c -> Fix (UnF f (replaceSubAt (n - 1) replacement c))
+    SumF xs -> Fix (SumF (replaceInList (n - 1) replacement xs))
+    ProdF xs -> Fix (ProdF (replaceInList (n - 1) replacement xs))
     _ -> Fix node
+
+replaceInList :: Int -> Fix ExprF -> [Fix ExprF] -> [Fix ExprF]
+replaceInList _ _ [] = []
+replaceInList n rep (x : xs)
+    | n < xSz = replaceSubAt n rep x : xs
+    | otherwise = x : replaceInList (n - xSz) rep xs
+  where
+    xSz = countNodes x
 
 ------------------------------------------------------------------------
 -- Mutation (simplified tree-based approach)
@@ -1074,18 +1270,43 @@ mutate env p = do
 -- Evolution loop
 ------------------------------------------------------------------------
 
--- | Produce one offspring via tournament selection, crossover, mutation, and e-graph rewriting.
+{- | Produce one offspring via tournament selection, crossover, mutation, and e-graph rewriting.
+Runs multiple cheap mutation cycles before evaluating fitness.
+-}
 evolve :: EGPEnv -> [ClassId] -> RndEGraph ClassId
 evolve env xs' = do
     xs <- Prelude.mapM canonicalM xs'
-    parents' <- tournament env xs
-    offspring <- combine env parents'
-    when (simplifyExpressions (envCfg env)) $ do
+    let cfg = envCfg env
+        ncycles = ncyclesPerIteration cfg
+    -- Run ncycles cheap mutations, only inserting into e-graph
+    candidates <- replicateM ncycles $ do
+        parents' <- tournament env xs
+        combine env parents'
+    -- Pick the best candidate (by fitness if available, otherwise random)
+    best <- pickBest env candidates
+    -- Optionally run saturation
+    when (simplifyExpressions cfg) $ do
         nClasses <- gets eGraphClassCount
-        when (nClasses < 1500) (runSaturationM (envExprCache env))
+        when (nClasses < 500) (runSaturationM (envExprCache env))
         refitChanged env
-    canonicalM offspring >>= \oc -> updateIfNothing (envExprCache env) (envFitFun env) oc >> pure ()
-    canonicalM offspring
+    -- Probabilistic NLOPT optimization
+    coin <- rnd $ tossBiased (optimizeProbability cfg)
+    if coin
+        then
+            canonicalM best >>= \oc -> updateIfNothing (envExprCache env) (envFitFun env) oc >> canonicalM oc
+        else canonicalM best
+
+-- | Pick the best candidate from a list, preferring those with known fitness.
+pickBest :: EGPEnv -> [ClassId] -> RndEGraph ClassId
+pickBest _env candidates = do
+    rated <- forM candidates $ \c -> do
+        c' <- canonicalM c
+        mf <- getFitnessM c'
+        pure (mf, c')
+    let withFit = [(f, c) | (Just f, c) <- rated]
+    if null withFit
+        then rnd $ randomFrom candidates
+        else pure . snd . maximumBy (compare `on` fst) $ withFit
 
 ------------------------------------------------------------------------
 -- Pareto front extraction and output formatting
@@ -1144,10 +1365,11 @@ printExpr' env ix ec' = do
     maxLoss <- negate . fromJust <$> getFitnessM ec
     let dist = lossFunction (envCfg env)
     forM
-        (Data.List.zip4 [(0 :: Int) ..] (envDataTrainVals env) (envDataTests env) thetas) $
-        \(view, (dataTrain, dataVal), dataTest, theta') ->
-            let expr = paramsToConst (VU.toList theta') best'
-                thetaStr = intercalate ";" $ Prelude.map show (VU.toList theta')
+        (Data.List.zip4 [(0 :: Int) ..] (envDataTrainVals env) (envDataTests env) thetas)
+        $ \(view, (dataTrain, dataVal), dataTest, theta') ->
+            let thetaList = VU.toList theta'
+                expr = paramsToConst thetaList best'
+                thetaStr = intercalate ";" $ Prelude.map show thetaList
                 vals =
                     computeDatasetMetrics best' dist maxLoss theta' dataTrain dataVal dataTest
              in pure $ formatRow env ix view expr best' thetaStr vals
@@ -1172,7 +1394,7 @@ tryImprove env ec _f' _f n goFn = do
     thetas' <- gets (getTheta ec)
     bestExpr <- extractBestExpr env ec
     let t = case thetas' of
-            Just (h : _) -> paramsToConst (VU.toList h) bestExpr
+            Just (h : _) -> simplifyDeep (paramsToConst (VU.toList h) bestExpr)
             _ -> Fix (LitF 0)
     ts <- goFn (n + 1) (max _f _f')
     pure (t : ts)
@@ -1195,28 +1417,70 @@ paretoFront' env maxSize' = go 1 (-(1.0 / 0.0))
                             else go (n + 1) (max f f')
 
 ------------------------------------------------------------------------
+-- Hall of Fame
+------------------------------------------------------------------------
+
+-- | Hall of fame: best (ClassId, fitness) per expression complexity.
+type HallOfFame = IM.IntMap (ClassId, Double)
+
+-- | Update the hall of fame with current population members.
+updateHOF :: EGPEnv -> [[ClassId]] -> HallOfFame -> RndEGraph HallOfFame
+updateHOF _env islands hof = do
+    let allPop = concat islands
+    foldM
+        ( \h cid -> do
+            cid' <- canonicalM cid
+            sz <- getSizeM cid'
+            mf <- getFitnessM cid'
+            case mf of
+                Nothing -> pure h
+                Just f -> case IM.lookup sz h of
+                    Just (_, bestF) | bestF >= f -> pure h
+                    _ -> pure (IM.insert sz (cid', f) h)
+        )
+        hof
+        allPop
+
+-- | Inject hall of fame entries back into a population.
+injectHOF :: EGPEnv -> HallOfFame -> [ClassId] -> RndEGraph [ClassId]
+injectHOF _env hof pop = do
+    let hofEntries = map fst (IM.elems hof)
+        nReplace = max 1 (length pop `div` 16) -- ~6% replacement
+    if null hofEntries
+        then pure pop
+        else do
+            replacements <- replicateM nReplace (rnd $ randomFrom hofEntries)
+            pure $ replacements ++ drop nReplace pop
+
+------------------------------------------------------------------------
 -- Island model
 ------------------------------------------------------------------------
 
--- | Migrate best individuals between islands. Replace migrationFraction of each
--- island with the best individuals from other islands.
+{- | Migrate best individuals between islands. Replace migrationFraction of each
+island with the best individuals from other islands.
+-}
 migrateIslands :: EGPEnv -> [[ClassId]] -> RndEGraph [[ClassId]]
 migrateIslands env islands = do
-    let nMigrate = max 1 $ round (migrationFraction (envCfg env) * fromIntegral (populationSize (envCfg env)))
+    let nMigrate =
+            max 1 $
+                round
+                    (migrationFraction (envCfg env) * fromIntegral (populationSize (envCfg env)))
     -- Collect best from each island
     bests <- forM islands $ \pop -> do
         fits <- forM pop $ \ec -> do
             mf <- getFitnessM ec
             pure (fromMaybe (-1e18) mf, ec)
-        pure . Prelude.map snd . Prelude.take nMigrate . sortBy (comparing (Down . fst)) $ fits
+        pure . Prelude.map snd . Prelude.take nMigrate . sortBy (comparing (Down . fst)) $
+            fits
     -- For each island, replace worst with best from other islands
-    forM (Prelude.zip [(0 :: Int)..] islands) $ \(i, pop) -> do
-        let migrants = concat [b | (j, b) <- Prelude.zip [(0 :: Int)..] bests, j /= i]
+    forM (Prelude.zip [(0 :: Int) ..] islands) $ \(i, pop) -> do
+        let migrants = concat [b | (j, b) <- Prelude.zip [(0 :: Int) ..] bests, j /= i]
             nReplace = min nMigrate (length migrants)
         if nReplace == 0 || null migrants
             then pure pop
             else do
-                selected <- replicateM nReplace (rnd $ randomFrom migrants) >>= Prelude.mapM canonicalM
+                selected <-
+                    replicateM nReplace (rnd $ randomFrom migrants) >>= Prelude.mapM canonicalM
                 pure $ selected ++ Prelude.drop nReplace pop
 
 ------------------------------------------------------------------------
@@ -1235,37 +1499,57 @@ egraphGP cfg nonterminals varnames dataTrainVals dataTests = do
     let env = mkEGPEnv cfg nonterminals varnames dataTrainVals dataTests cache
         nIslands = numIslands cfg
         islandSize = max 10 (populationSize cfg `div` nIslands)
-        islandCfg = cfg { populationSize = islandSize }
-        islandEnv = env { envCfg = islandCfg }
+        islandCfg = cfg{populationSize = islandSize}
+        islandEnv = env{envCfg = islandCfg}
      in do
             loadState env
             _ <- insertTerms env
             evaluateUnevaluated (envExprCache env) (envFitFun env)
             t0 <- io getPOSIXTime
             -- Initialize islands
-            islands <- replicateM nIslands (initPopulation islandEnv >>= Prelude.mapM canonicalM)
+            islands <-
+                replicateM nIslands (initPopulation islandEnv >>= Prelude.mapM canonicalM)
             _out <- tracePopulation env (Prelude.zip [0 ..] (concat islands))
             -- Run generations with migration
-            let runIslandGen _ (pops, o, ix) = do
+            let runIslandGen genCountdown (pops, o, ix, hof) = do
+                    let genNum = generations cfg - genCountdown -- counting up from 0
+                        warmup = warmupMaxsizeBy cfg
+                        effectiveMaxSz =
+                            if warmup <= 0
+                                then maxExpressionSize cfg
+                                else
+                                    min
+                                        (maxExpressionSize cfg)
+                                        ( 3
+                                            + round
+                                                ( fromIntegral (maxExpressionSize cfg - 3)
+                                                    * min 1.0 (fromIntegral genNum / (warmup * fromIntegral (generations cfg)))
+                                                )
+                                        )
+                        warmEnv =
+                            islandEnv{envCfg = (envCfg islandEnv){maxExpressionSize = effectiveMaxSz}}
                     -- Evolve each island independently
                     pops' <- forM pops $ \pop -> do
-                        newPop <- replicateM islandSize (evolve islandEnv pop)
+                        newPop <- replicateM islandSize (evolve warmEnv pop)
                         -- Compact if needed
                         totSz <- gets eGraphNodeCount
                         let full = totSz > max maxMem islandSize
-                        when full (cleanEGraph islandEnv)
-                        selectNewPop islandEnv full newPop
+                        when full (cleanEGraph warmEnv)
+                        selectNewPop warmEnv full newPop
                     -- Migrate between islands
-                    pops'' <- migrateIslands islandEnv pops'
-                    o' <- tracePopulation env (Prelude.zip [ix ..] (concat pops''))
-                    pure (pops'', o <> o', ix + islandSize * nIslands)
-            (finalIslands, _, _) <-
+                    pops'' <- migrateIslands warmEnv pops'
+                    -- Update and inject hall of fame
+                    hof' <- updateHOF islandEnv pops'' hof
+                    pops''' <- forM pops'' (injectHOF islandEnv hof')
+                    o' <- tracePopulation env (Prelude.zip [ix ..] (concat pops'''))
+                    pure (pops''', o <> o', ix + islandSize * nIslands, hof')
+            (finalIslands, _, _, _) <-
                 iterateFor
                     (generations cfg)
                     t0
                     (maxTimeMaybe env)
-                    (islands, _out, islandSize * nIslands)
+                    (islands, _out, islandSize * nIslands, IM.empty)
                     runIslandGen
             -- Merge all island results for Pareto extraction
-            _ <- Prelude.mapM canonicalM (concat finalIslands)
+            mapM_ canonicalM (concat finalIslands)
             saveState env >> paretoFront' env (maxExpressionSize cfg)

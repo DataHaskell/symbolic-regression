@@ -1,43 +1,58 @@
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
--- | Expression functor for hegg's e-graph.
---
--- Defines the core symbolic regression language: a fixed-point expression tree
--- with binary operations, unary operations, variables, parameters, and literals.
--- Uses hegg's 'Fix' directly as the recursive wrapper.
-module Symbolic.Regression.Expr
-    ( -- * Expression functor
-      ExprF(..)
-    , BinOp(..)
-    , UnOp(..)
 
-      -- * Re-exports from hegg
-    , Fix(..)
-    , cata
+{- | Expression functor for hegg's e-graph.
 
-      -- * Smart constructors
-    , var
-    , param
-    , lit
+Defines the core symbolic regression language: a fixed-point expression tree
+with binary operations, unary operations, variables, parameters, and literals.
+Uses hegg's 'Fix' directly as the recursive wrapper.
+-}
+module Symbolic.Regression.Expr (
+    -- * Expression functor
+    ExprF (..),
+    BinOp (..),
+    UnOp (..),
 
-      -- * Type aliases
-    , PVector
-    , Features
-    ) where
+    -- * Re-exports from hegg
+    Fix (..),
+    cata,
 
-import Data.Equality.Utils (Fix(..), cata)
+    -- * Smart constructors
+    var,
+    param,
+    lit,
+
+    -- * Type aliases
+    PVector,
+    Features,
+) where
+
+import Data.Equality.Utils (Fix (..), cata)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
 
--- | Expression functor. Each constructor is one node in the expression DAG.
--- The type parameter @a@ is the recursive position (child reference).
+{- | Expression functor. Each constructor is one node in the expression DAG.
+The type parameter @a@ is the recursive position (child reference).
+
+'SumF' and 'ProdF' represent AC-canonical addition and multiplication as
+sorted lists of children (multisets). Binary 'Add'/'Mul' via 'BinF' are
+converted to these on e-graph insertion by 'exprNormalize'.
+-}
 data ExprF a
-    = VarF   {-# UNPACK #-} !Int      -- ^ Feature variable by column index
-    | ParamF {-# UNPACK #-} !Int      -- ^ Learnable parameter by index
-    | LitF   {-# UNPACK #-} !Double   -- ^ Numeric literal
-    | BinF   !BinOp !a !a             -- ^ Binary operation
-    | UnF    !UnOp  !a                 -- ^ Unary operation
+    = -- | Feature variable by column index
+      VarF {-# UNPACK #-} !Int
+    | -- | Learnable parameter by index
+      ParamF {-# UNPACK #-} !Int
+    | -- | Numeric literal
+      LitF {-# UNPACK #-} !Double
+    | -- | Binary operation (Sub, Div, Pow only in e-graph)
+      BinF !BinOp !a !a
+    | -- | Unary operation
+      UnF !UnOp !a
+    | -- | AC addition: sorted list of summands
+      SumF [a]
+    | -- | AC multiplication: sorted list of factors
+      ProdF [a]
     deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | Binary operations.
@@ -99,7 +114,7 @@ instance Num (Fix ExprF) where
     fromInteger = lit . fromInteger
 
 instance Fractional (Fix ExprF) where
-    _ / Fix (LitF 0) = lit (1/0)
+    _ / Fix (LitF 0) = lit (1 / 0)
     l / Fix (LitF 1) = l
     Fix (LitF a) / Fix (LitF b) = lit (a / b)
     l / r = Fix (BinF Div l r)
@@ -109,16 +124,16 @@ instance Fractional (Fix ExprF) where
     fromRational = lit . fromRational
 
 instance Floating (Fix ExprF) where
-    pi    = lit pi
-    exp   = Fix . UnF Exp
-    log   = Fix . UnF Log
-    sqrt  = Fix . UnF Sqrt
-    sin   = Fix . UnF Sin
-    cos   = Fix . UnF Cos
+    pi = lit pi
+    exp = Fix . UnF Exp
+    log = Fix . UnF Log
+    sqrt = Fix . UnF Sqrt
+    sin = Fix . UnF Sin
+    cos = Fix . UnF Cos
     tan x = sin x / cos x
-    asin  = error "asin not supported"
-    acos  = error "acos not supported"
-    atan  = error "atan not supported"
+    asin = error "asin not supported"
+    acos = error "acos not supported"
+    atan = error "atan not supported"
     sinh x = (exp x - exp (negate x)) / 2
     cosh x = (exp x + exp (negate x)) / 2
     tanh x = sinh x / cosh x

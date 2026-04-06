@@ -2,15 +2,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE LambdaCase #-}
--- | E-graph adapter: wraps hegg's API to provide the interface that
--- Symbolic.Regression expects (previously provided by Algorithm.EqSat).
---
--- Uses hegg's 'normalizeNode' for A\/C canonicalization of Add\/Mul,
--- eliminating commutativity rewrite rules.
+-- | E-graph adapter wrapping hegg's API for symbolic regression.
 module Symbolic.Regression.EGraph
     ( -- * E-graph state
       SREGraph
-    , RndEGraph
     , emptySREGraph
 
       -- * Core operations
@@ -27,75 +22,150 @@ module Symbolic.Regression.EGraph
     , eGraphClassCount
     , eGraphNodeCount
 
+      -- * Metadata (fitness, size, theta)
+    , getFitness
+    , getSize
+    , getTheta
+    , insertFitness
+    , getTopFitWithSize
+    , getTopFit
+    , getAllClassIds
+    , doesExist
+
       -- * Re-exports
     , ClassId
     ) where
 
+import Control.Monad.State.Strict (State, runState, state)
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Set as S
+import Data.List (sortBy)
+import Data.Ord (Down(..), comparing)
+import Data.Maybe (mapMaybe)
 
-import qualified Data.Equality.Utils as H
-import Data.Equality.Graph (EGraph, ClassId, Language(..), represent, find, merge, rebuild, emptyEGraph)
+import Data.Equality.Graph (EGraph, ClassId, Language(..), represent, find, merge, rebuild, emptyEGraph, add, addWithNorm)
 import Data.Equality.Graph.Internal (EGraph(..))
-import Data.Equality.Graph.Classes (EClass(..))
+import Data.Equality.Graph.Classes (EClass(..), eClassNodes)
+import Data.Equality.Graph.Lens
+import Data.Equality.Graph.Nodes (ENode(..))
 import Data.Equality.Extraction (extractBest)
 import Data.Equality.Saturation (runEqualitySaturationN)
 import Data.Equality.Saturation.Scheduler (defaultBackoffScheduler)
 import Data.Equality.Graph.Monad (runEGraphM)
 
-import Data.SRTree.Internal (SRTree(..))
-import qualified Data.SRTree.Recursion as SR
-
-import Symbolic.Regression.Language (SRAnalysis(..), srCost, toHeggFix, fromHeggFix)
+import Symbolic.Regression.Expr
+import Symbolic.Regression.Language (SRAnalysis(..), srCost, exprNormalize)
 import Symbolic.Regression.Rewrites (srRewrites)
 
--- | The e-graph type for symbolic regression
-type SREGraph = EGraph SRAnalysis SRTree
+-- | The e-graph type for symbolic regression.
+type SREGraph = EGraph SRAnalysis ExprF
 
--- | Monad for e-graph operations with random state.
--- Unlike srtree's RndEGraph which is StateT EGraph (StateT StdGen IO),
--- we keep the e-graph as a plain value and thread it explicitly.
--- This type alias exists for documentation.
-type RndEGraph = SREGraph
-
--- | Empty e-graph
 emptySREGraph :: SREGraph
 emptySREGraph = emptyEGraph
 
--- | Insert a tree into the e-graph, return its canonical class ID
-insertTree :: SR.Fix SRTree -> SREGraph -> (ClassId, SREGraph)
-insertTree tree eg =
-    let (!cid, !eg') = represent (toHeggFix tree) eg
-    in (find cid eg', eg')
+------------------------------------------------------------------------
+-- Core operations
+------------------------------------------------------------------------
 
--- | Get canonical class ID
+-- | Insert a tree using context-aware normalization (Sub/Div elimination, AC flattening).
+insertTree :: Fix ExprF -> SREGraph -> (ClassId, SREGraph)
+insertTree (Fix node) eg =
+    -- Recursively insert children first, threading e-graph state
+    let (node', eg') = runState (traverse (\child -> state (insertTree child)) node) eg
+    in addWithNorm exprNormalize (Node node') eg'
+
 canonical :: ClassId -> SREGraph -> ClassId
 canonical = find
 
--- | Extract the best (lowest-cost) expression from an e-class
-getBestExpr :: ClassId -> SREGraph -> SR.Fix SRTree
-getBestExpr cid eg = fromHeggFix (extractBest eg srCost (find cid eg))
+getBestExpr :: ClassId -> SREGraph -> Fix ExprF
+getBestExpr cid eg = extractBest eg srCost (find cid eg)
 
--- | Merge two e-classes
 mergeClasses :: ClassId -> ClassId -> SREGraph -> (ClassId, SREGraph)
-mergeClasses c1 c2 eg = merge c1 c2 eg
+mergeClasses = merge
 
--- | Rebuild the e-graph (restore invariants after merges)
 rebuildEGraph :: SREGraph -> SREGraph
 rebuildEGraph = rebuild
 
--- | Run one iteration of equality saturation with algebraic rewrite rules.
--- Uses hegg's backoff scheduler. Commutativity is handled by
--- normalizeNode (not rewrite rules).
--- Matches symregg's approach: 1 iteration per call (not full 30-iteration saturation).
 runSaturation :: SREGraph -> SREGraph
 runSaturation eg =
     snd $ runEGraphM eg (runEqualitySaturationN 1 defaultBackoffScheduler srRewrites)
 
--- | Number of e-classes in the e-graph
+------------------------------------------------------------------------
+-- Queries
+------------------------------------------------------------------------
+
 eGraphClassCount :: SREGraph -> Int
 eGraphClassCount = IM.size . classes
 
--- | Number of e-nodes in the e-graph
 eGraphNodeCount :: SREGraph -> Int
 eGraphNodeCount eg = sum [ S.size (eClassNodes c) | c <- IM.elems (classes eg) ]
+
+------------------------------------------------------------------------
+-- Metadata operations (fitness, size, theta)
+------------------------------------------------------------------------
+
+getFitness :: ClassId -> SREGraph -> Maybe Double
+getFitness cid eg =
+    let cid' = find cid eg
+    in case IM.lookup cid' (classes eg) of
+        Just ec -> srFitness (eClassData ec)
+        Nothing -> Nothing
+
+getSize :: ClassId -> SREGraph -> Int
+getSize cid eg =
+    let cid' = find cid eg
+    in case IM.lookup cid' (classes eg) of
+        Just ec -> srSize (eClassData ec)
+        Nothing -> 0
+
+getTheta :: ClassId -> SREGraph -> Maybe [PVector]
+getTheta cid eg =
+    let cid' = find cid eg
+    in case IM.lookup cid' (classes eg) of
+        Just ec -> srTheta (eClassData ec)
+        Nothing -> Nothing
+
+-- | Set fitness and theta for an e-class by modifying its analysis data.
+insertFitness :: ClassId -> Double -> [PVector] -> SREGraph -> SREGraph
+insertFitness cid fit theta eg =
+    let cid' = find cid eg
+    in eg { classes = IM.adjust updateClass cid' (classes eg) }
+  where
+    updateClass ec = ec { eClassData = (eClassData ec)
+        { srFitness = Just fit
+        , srTheta   = Just theta
+        } }
+
+-- | Top-k e-classes with a given size, sorted by fitness (best first).
+getTopFitWithSize :: Int -> Int -> SREGraph -> [(ClassId, Double)]
+getTopFitWithSize sz k eg =
+    take k . sortBy (comparing (Down . snd)) $
+        mapMaybe extract (IM.toList (classes eg))
+  where
+    extract (cid, ec) =
+        let d = eClassData ec
+        in if srSize d == sz
+           then case srFitness d of
+               Just f  -> Just (cid, f)
+               Nothing -> Nothing
+           else Nothing
+
+-- | Top-k e-classes overall, sorted by fitness (best first).
+getTopFit :: Int -> SREGraph -> [(ClassId, Double)]
+getTopFit k eg =
+    take k . sortBy (comparing (Down . snd)) $
+        mapMaybe extract (IM.toList (classes eg))
+  where
+    extract (cid, ec) = case srFitness (eClassData ec) of
+        Just f  -> Just (cid, f)
+        Nothing -> Nothing
+
+-- | All canonical class IDs.
+getAllClassIds :: SREGraph -> [ClassId]
+getAllClassIds = IM.keys . classes
+
+-- | Check whether an e-node exists in the e-graph.
+doesExist :: ExprF ClassId -> SREGraph -> Bool
+doesExist node eg =
+    let enode = Node (fmap (flip find eg) node)
+    in any (S.member enode . eClassNodes) (IM.elems (classes eg))

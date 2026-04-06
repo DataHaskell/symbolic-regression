@@ -1,9 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TypeApplications #-}
--- | Fitness evaluation with NLopt parameter optimization.
--- Uses srtree's evaluation and optimization machinery directly,
--- making fitness evaluation identical to the original symbolic-regression.
+-- | Fitness evaluation with parameter optimization.
 module Symbolic.Regression.Fitness
     ( DataSet
     , evaluateFitness
@@ -12,82 +10,69 @@ module Symbolic.Regression.Fitness
     , mseScore
     ) where
 
-import qualified Data.Massiv.Array as M
-import Data.SRTree.Internal (SRTree(..), countParams)
-import Data.SRTree (relabelParams)
-import qualified Data.SRTree.Recursion as SR
-import Data.SRTree.Eval (evalTree, PVector, SRMatrix)
-import Algorithm.SRTree.Opt (minimizeNLL)
-import Algorithm.SRTree.Likelihoods (Distribution(..))
+import qualified Data.Vector.Unboxed as VU
 import System.Random (StdGen, randomR)
 
--- | A dataset: feature matrix (rows x cols) and target vector
-type DataSet = (SRMatrix, PVector)
+import Symbolic.Regression.Expr
+import Symbolic.Regression.Expr.Eval (evalTree)
+import Symbolic.Regression.Expr.Opt (Distribution(..), minimizeNLL)
+import Symbolic.Regression.Expr.Utils (relabelParams, countParams)
 
--- | Evaluate fitness with NLopt parameter optimization.
--- Relabels parameters, generates random initial theta, optimizes via NLopt,
--- returns (negated MSE, optimized theta).
--- This matches srtree's fitnessFun from Algorithm.EqSat.SearchSR.
-evaluateFitness :: Int       -- ^ NLopt iterations
-                -> Int       -- ^ Number of retries with random inits
-                -> DataSet   -- ^ Training data
-                -> SR.Fix SRTree
-                -> StdGen
-                -> (Double, PVector, StdGen)
+-- | A dataset: feature matrix and target vector.
+type DataSet = (Features, PVector)
+
+-- | Evaluate fitness with parameter optimization.
+evaluateFitness :: Int -> Int -> DataSet -> Fix ExprF -> StdGen -> (Double, PVector, StdGen)
 evaluateFitness nIter nRetries (xTrain, yTrain) tree0 g0 =
     let !tree = relabelParams tree0
         !nParams = countParams tree :: Int
     in if nParams == 0
-       then -- No parameters to optimize, just evaluate directly
-           let !yPred = M.compute (evalTree xTrain M.empty tree)
-               !mse = mseScore yTrain yPred
-               !fit = if isNaN mse || isInfinite mse then -1e18 else negate mse
-           in (fit, M.empty, g0)
-       else -- Optimize parameters via NLopt with multiple retries
-           let (!bestFit, !bestTheta, !gFinal) = tryRetries nRetries nParams nIter xTrain yTrain tree g0
-           in (bestFit, bestTheta, gFinal)
+       then let !yPred = evalTree xTrain VU.empty tree
+                !err = mseScore yTrain yPred
+                !fit = if isNaN err || isInfinite err then -1e18 else negate err
+            in (fit, VU.empty, g0)
+       else let (!bestFit, !bestTheta, !gFinal) = tryRetries nRetries nParams nIter xTrain yTrain tree g0
+            in (bestFit, bestTheta, gFinal)
 
--- | Try multiple random initializations, keep the best
-tryRetries :: Int -> Int -> Int -> SRMatrix -> PVector -> SR.Fix SRTree -> StdGen -> (Double, PVector, StdGen)
-tryRetries nRetries nParams nIter xTrain yTrain tree g0 = go nRetries g0 (-1e18) M.empty
+tryRetries :: Int -> Int -> Int -> Features -> PVector -> Fix ExprF -> StdGen -> (Double, PVector, StdGen)
+tryRetries nRetries nParams nIter xTrain yTrain tree g0 = go nRetries g0 (-1e18) VU.empty
   where
     go 0 !g !bestFit !bestTheta = (bestFit, bestTheta, g)
     go !n !g !bestFit !bestTheta =
         let (!theta0, !g') = randomTheta nParams g
             (!thetaOpt, _, _) = minimizeNLL MSE Nothing nIter xTrain yTrain tree theta0
-            !yPred = M.compute (evalTree xTrain thetaOpt tree)
-            !mse = mseScore yTrain yPred
-            !fit = if isNaN mse || isInfinite mse then -1e18 else negate mse
+            !yPred = evalTree xTrain thetaOpt tree
+            !err = mseScore yTrain yPred
+            !fit = if isNaN err || isInfinite err then -1e18 else negate err
         in if fit > bestFit
            then go (n-1) g' fit thetaOpt
            else go (n-1) g' bestFit bestTheta
 
--- | Generate random initial parameter vector
 randomTheta :: Int -> StdGen -> (PVector, StdGen)
 randomTheta n g = go n g []
   where
     go :: Int -> StdGen -> [Double] -> (PVector, StdGen)
-    go 0 !g' !acc = (M.fromList @M.S M.Seq (reverse acc), g')
+    go 0 !g' !acc = (VU.fromList (reverse acc), g')
     go !k !g' !acc =
         let (!v, !g'') = randomR (-1.0 :: Double, 1.0) g'
         in go (k-1) g'' (v : acc)
 
--- | Evaluate an expression on a feature matrix with given parameters.
-evaluateExpr :: SR.Fix SRTree -> PVector -> SRMatrix -> PVector
-evaluateExpr tree theta xMatrix = M.compute (evalTree xMatrix theta tree)
+-- | Evaluate an expression on features with given parameters.
+evaluateExpr :: Fix ExprF -> PVector -> Features -> PVector
+evaluateExpr tree theta xMatrix = evalTree xMatrix theta tree
 
--- | Compute R² (coefficient of determination).
+-- | R^2 score.
 r2Score :: PVector -> PVector -> Double
 r2Score yTrue yPred =
-    let !n = M.elemsCount yTrue
-        !yMean = M.sum yTrue / fromIntegral n
-        !ssTot = M.sum $ M.map (\y -> (y - yMean) ^ (2 :: Int)) yTrue
-        !ssRes = M.sum $ M.zipWith (\yt yp -> (yt - yp) ^ (2 :: Int)) yTrue yPred
+    let !n = VU.length yTrue
+        !yMean = VU.sum yTrue / fromIntegral n
+        !ssTot = VU.sum $ VU.map (\y -> (y - yMean) ^ (2 :: Int)) yTrue
+        !ssRes = VU.sum $ VU.zipWith (\yt yp -> (yt - yp) ^ (2 :: Int)) yTrue yPred
     in if ssTot == 0 then 0 else 1 - ssRes / ssTot
 
--- | Compute MSE (mean squared error).
+-- | MSE score.
 mseScore :: PVector -> PVector -> Double
 mseScore yTrue yPred =
-    let !n = M.elemsCount yTrue
-        !ssRes = M.sum $ M.zipWith (\yt yp -> (yt - yp) ^ (2 :: Int)) yTrue yPred
+    let !n = VU.length yTrue
+        !ssRes = VU.sum $ VU.zipWith (\yt yp -> (yt - yp) ^ (2 :: Int)) yTrue yPred
     in ssRes / fromIntegral n

@@ -3,8 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- | Algebraic rewrite rules for symbolic regression, ported from srtree's
--- Algorithm.EqSat.Simplify to hegg's rewrite API.
+-- | Algebraic rewrite rules for symbolic regression using hegg's API.
 --
 -- Commutativity rules are /omitted/ — they are handled structurally by
 -- 'normalizeNode' in "Symbolic.Regression.Language".
@@ -18,111 +17,79 @@ import Data.Equality.Matching
 import Data.Equality.Matching.Database (Subst, findSubst)
 import Data.Equality.Saturation.Rewrites
 
-import Data.SRTree.Internal (SRTree(..), Op(..), Function(..))
-
+import Symbolic.Regression.Expr (ExprF(..), BinOp(..), UnOp(..))
 import Symbolic.Regression.Language (SRAnalysis(..), SRConst(..))
 
--- | Pattern helpers
-x, y, z :: Pattern SRTree
+-- | Pattern variables
+x, y, z :: Pattern ExprF
 x = "x"
 y = "y"
 z = "z"
 
--- | Construct a non-variable pattern from an SRTree node
-p :: SRTree (Pattern SRTree) -> Pattern SRTree
+-- | Construct a non-variable pattern from an ExprF node
+p :: ExprF (Pattern ExprF) -> Pattern ExprF
 p = pat
 
-pAdd, pSub, pMul, pDiv :: Pattern SRTree -> Pattern SRTree -> Pattern SRTree
-pAdd a b = p (Bin Add a b)
-pSub a b = p (Bin Sub a b)
-pMul a b = p (Bin Mul a b)
-pDiv a b = p (Bin Div a b)
+pAdd, pSub, pMul, pDiv :: Pattern ExprF -> Pattern ExprF -> Pattern ExprF
+pAdd a b = p (BinF Add a b)
+pSub a b = p (BinF Sub a b)
+pMul a b = p (BinF Mul a b)
+pDiv a b = p (BinF Div a b)
 
-pPow :: Pattern SRTree -> Pattern SRTree -> Pattern SRTree
-pPow a b = p (Bin Power a b)
+pPow :: Pattern ExprF -> Pattern ExprF -> Pattern ExprF
+pPow a b = p (BinF Pow a b)
 
-pConst :: Double -> Pattern SRTree
-pConst v = p (Const v)
+pLit :: Double -> Pattern ExprF
+pLit v = p (LitF v)
 
-pLog, pExp, pRecip, pSqrt, pSq, pAbs :: Pattern SRTree -> Pattern SRTree
-pLog   a = p (Uni Log a)
-pExp   a = p (Uni Exp a)
-pRecip a = p (Uni Recip a)
-pSqrt  a = p (Uni Sqrt a)
-pSq    a = p (Uni Square a)
-pAbs   a = p (Uni Abs a)
+pLog, pExp, pRecip, pSqrt, pSq, pAbs :: Pattern ExprF -> Pattern ExprF
+pLog   a = p (UnF Log a)
+pExp   a = p (UnF Exp a)
+pRecip a = p (UnF Recip a)
+pSqrt  a = p (UnF Sqrt a)
+pSq    a = p (UnF Sq a)
+pAbs   a = p (UnF Abs a)
 
 -- | All rewrite rules for symbolic regression.
 -- Commutativity of Add and Mul is handled by 'normalizeNode', not here.
-srRewrites :: [Rewrite SRAnalysis SRTree]
+srRewrites :: [Rewrite SRAnalysis ExprF]
 srRewrites = identityRules ++ algebraicRules ++ functionRules
 
--- | Identity and annihilation rules
-identityRules :: [Rewrite SRAnalysis SRTree]
+identityRules :: [Rewrite SRAnalysis ExprF]
 identityRules =
-    [ -- x + 0 = x
-      pAdd x (pConst 0) := x
-      -- 0 + x = x
-    , pAdd (pConst 0) x := x
-      -- x - 0 = x
-    , pSub x (pConst 0) := x
-      -- x * 1 = x
-    , pMul x (pConst 1) := x
-      -- 1 * x = x
-    , pMul (pConst 1) x := x
-      -- x * 0 = 0
-    , pMul x (pConst 0) := pConst 0
-      -- 0 * x = 0
-    , pMul (pConst 0) x := pConst 0
-      -- x / 1 = x
-    , pDiv x (pConst 1) := x
-      -- x ** 1 = x
-    , pPow x (pConst 1) := x
-      -- x ** 0 = 1
-    , pPow x (pConst 0) := pConst 1
-      -- x - x = 0
-    , pSub x x := pConst 0
-      -- x / x = 1  (when x != 0)
-    , pDiv x x := pConst 1
+    [ pAdd x (pLit 0) := x
+    , pAdd (pLit 0) x := x
+    , pSub x (pLit 0) := x
+    , pMul x (pLit 1) := x
+    , pMul (pLit 1) x := x
+    , pMul x (pLit 0) := pLit 0
+    , pMul (pLit 0) x := pLit 0
+    , pDiv x (pLit 1) := x
+    , pPow x (pLit 1) := x
+    , pPow x (pLit 0) := pLit 1
+    , pSub x x := pLit 0
+    , pDiv x x := pLit 1
     ]
 
--- | Core algebraic rules (associativity, distributivity, etc.)
--- Commutativity is NOT here — handled by normalizeNode.
-algebraicRules :: [Rewrite SRAnalysis SRTree]
+-- Associativity, Sub rearrangement, and Div rearrangement are now
+-- handled structurally by normalizeInContext (AC flattening, Sub/Div elimination).
+algebraicRules :: [Rewrite SRAnalysis ExprF]
 algebraicRules =
-    [ -- Associativity of addition
-      pAdd (pAdd x y) z := pAdd x (pAdd y z)
-      -- Associativity of multiplication
-    , pMul (pMul x y) z := pMul x (pMul y z)
-      -- Distributivity: x*(y+z) = x*y + x*z
-    , pMul x (pAdd y z) := pAdd (pMul x y) (pMul x z)
-      -- Factoring: x*y + x*z = x*(y+z)
+    [ -- Distributivity (genuinely useful — not structural)
+      pMul x (pAdd y z) := pAdd (pMul x y) (pMul x z)
     , pAdd (pMul x y) (pMul x z) := pMul x (pAdd y z)
-      -- Subtraction rearrangement
-    , pSub x (pAdd y z) := pSub (pSub x y) z
-    , pSub x (pSub y z) := pAdd (pSub x y) z
-      -- Division rearrangement
-    , pDiv (pMul x y) z := pMul (pDiv x z) y
       -- Power rules
     , pMul x x := pSq x
     , pSq (pSqrt x) := x
     ]
 
--- | Function simplification rules
-functionRules :: [Rewrite SRAnalysis SRTree]
+functionRules :: [Rewrite SRAnalysis ExprF]
 functionRules =
-    [ -- log(exp(x)) = x
-      pLog (pExp x) := x
-      -- exp(log(x)) = x
+    [ pLog (pExp x) := x
     , pExp (pLog x) := x
-      -- log(x*y) = log(x) + log(y)
     , pLog (pMul x y) := pAdd (pLog x) (pLog y)
-      -- log(x**y) = y*log(x)
     , pLog (pPow x y) := pMul y (pLog x)
-      -- recip(recip(x)) = x
     , pRecip (pRecip x) := x
-      -- sqrt(x^2) = abs(x)
     , pSqrt (pSq x) := pAbs x
-      -- abs(x*y) = abs(x)*abs(y)
     , pAbs (pMul x y) := pMul (pAbs x) (pAbs y)
     ]

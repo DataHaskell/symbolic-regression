@@ -1,9 +1,9 @@
-{-# OPTIONS_GHC -Wno-orphans #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 {- | hegg 'Language' and 'Analysis' instances for 'ExprF'.
 
@@ -23,7 +23,7 @@ module Symbolic.Regression.Language (
 ) where
 
 import qualified Data.IntMap.Strict as IM
-import Data.List (sort)
+import Data.List (foldl', sort)
 import qualified Data.Set as S
 
 import Data.Equality.Analysis
@@ -31,6 +31,15 @@ import Data.Equality.Extraction
 import Data.Equality.Graph
 import Data.Equality.Graph.Internal (EGraph (..))
 import Data.Equality.Graph.Lens
+import Data.Equality.Graph.Poly (
+    PolyMap,
+    addPoly,
+    canonicalizePoly,
+    constPoly,
+    mulPoly,
+    polySize,
+    singletonPoly,
+ )
 
 import Symbolic.Regression.Expr
 
@@ -64,23 +73,54 @@ exprNormalize node eg = case node of
     BinF Div a b ->
         let (recipB, eg1) = add (Node (UnF Recip b)) eg
          in (BinF Mul (min a recipB) (max a recipB), eg1)
-    -- Flatten and sort Add chains into SumF
+    -- Addition: convert to PolyF (sum of children's polynomials)
     BinF Add a b ->
-        let aLeaves = collectSumLeaves a eg
-            bLeaves = collectSumLeaves b eg
-            sorted = sort (aLeaves ++ bLeaves)
-         in (SumF sorted, eg)
-    -- Flatten and sort Mul chains into ProdF
+        let pa = classToPolyMap a eg
+            pb = classToPolyMap b eg
+         in (PolyF (addPoly pa pb), eg)
+    -- Multiplication: convert to PolyF (product of children's polynomials)
     BinF Mul a b ->
-        let aLeaves = collectProdLeaves a eg
-            bLeaves = collectProdLeaves b eg
-            sorted = sort (aLeaves ++ bLeaves)
-         in (ProdF sorted, eg)
-    -- Re-flatten SumF
-    SumF xs -> (SumF (sort (concatMap (`collectSumLeaves` eg) xs)), eg)
-    -- Re-flatten ProdF
-    ProdF xs -> (ProdF (sort (concatMap (`collectProdLeaves` eg) xs)), eg)
+        let pa = classToPolyMap a eg
+            pb = classToPolyMap b eg
+         in (PolyF (mulPoly pa pb), eg)
+    -- SumF: convert to PolyF
+    SumF xs ->
+        let polys = map (`classToPolyMap` eg) xs
+         in (PolyF (foldl' addPoly (constPoly 0) polys), eg)
+    -- ProdF: convert to PolyF
+    ProdF xs ->
+        let polys = map (`classToPolyMap` eg) xs
+         in (PolyF (foldl' mulPoly (constPoly 1) polys), eg)
+    -- Re-canonicalize PolyF: apply find to all ClassId keys inside the polynomial
+    PolyF pm -> (PolyF (canonicalizePoly (`find` eg) pm), eg)
     other -> (normalizeNode other, eg)
+
+{- | Convert an e-class to its PolyMap representation.
+  If the class contains a PolyF, use it directly.
+  If it contains a LitF, use constPoly.
+  Otherwise, treat the class as an opaque atom (singletonPoly).
+-}
+classToPolyMap :: ClassId -> EGraph a ExprF -> PolyMap
+classToPolyMap cid eg =
+    let cid' = find cid eg
+     in case IM.lookup cid' (classes eg) of
+            Nothing -> singletonPoly cid'
+            Just ec ->
+                -- Look for a PolyF first, then LitF, then fall back to singleton
+                let nodes = eClassNodes ec
+                    findPoly =
+                        S.foldl'
+                            ( \acc (Node n) -> case (acc, n) of
+                                (Nothing, PolyF pm) -> Just (Left pm)
+                                (Nothing, LitF v) -> Just (Right v)
+                                _ -> acc
+                            )
+                            Nothing
+                            nodes
+                 in case findPoly of
+                        Just (Left pm) -> pm
+                        Just (Right v) -> constPoly v
+                        Nothing -> singletonPoly cid'
 
 -- | Collect sum leaves: if the e-class contains a SumF, return its children; otherwise [cid].
 collectSumLeaves :: ClassId -> EGraph a ExprF -> [ClassId]
@@ -222,6 +262,8 @@ instance Analysis SRAnalysis ExprF where
                 (1 + sum (map srSize xs))
                 Nothing
                 Nothing
+        PolyF _ ->
+            SRAnalysis NotConst 1 Nothing Nothing
 
     joinA a b =
         SRAnalysis
@@ -270,3 +312,4 @@ srCost _anl = \case
     UnF _ (_, c) -> 3 + c
     SumF xs -> 1 + sum (map snd xs)
     ProdF xs -> 1 + sum (map snd xs)
+    PolyF pm -> polySize pm + 1

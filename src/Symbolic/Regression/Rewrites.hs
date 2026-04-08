@@ -9,6 +9,7 @@ Commutativity rules are /omitted/ — they are handled structurally by
 -}
 module Symbolic.Regression.Rewrites (
     srRewrites,
+    srRewritesNoDist,
 ) where
 
 import Data.Equality.Matching
@@ -54,6 +55,21 @@ Commutativity of Add and Mul is handled by 'normalizeNode', not here.
 srRewrites :: [Rewrite SRAnalysis ExprF]
 srRewrites = identityRules ++ algebraicRules ++ functionRules
 
+{- | Restricted rewrite set excluding distributivity.
+Avoids O(n²) blowup when saturating a SumF with many children.
+Used during boosting training; full 'srRewrites' is reserved for final distillation.
+-}
+srRewritesNoDist :: [Rewrite SRAnalysis ExprF]
+srRewritesNoDist = identityRules ++ algebraicRulesNoDist ++ functionRules
+
+-- | Algebraic rules without distributivity.
+algebraicRulesNoDist :: [Rewrite SRAnalysis ExprF]
+algebraicRulesNoDist =
+    [ pMul x x := pSq x
+    , pSq (pNeg x) := pSq x
+    , pSq (pSqrt x) := x
+    ]
+
 identityRules :: [Rewrite SRAnalysis ExprF]
 identityRules =
     [ pAdd x (pLit 0) := x
@@ -74,10 +90,8 @@ identityRules =
 -- handled structurally by normalizeInContext (AC flattening, Sub/Div elimination).
 algebraicRules :: [Rewrite SRAnalysis ExprF]
 algebraicRules =
-    [ -- Distributivity (genuinely useful — not structural)
-      pMul x (pAdd y z) := pAdd (pMul x y) (pMul x z)
-    , pAdd (pMul x y) (pMul x z) := pMul x (pAdd y z)
-    , -- Power rules
+    [ -- Distributivity removed: now handled structurally by PolyF container.
+      -- Power rules
       pMul x x := pSq x
     , pSq (pNeg x) := pSq x
     , pSq (pSqrt x) := x

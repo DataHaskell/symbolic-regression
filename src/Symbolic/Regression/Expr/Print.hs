@@ -30,6 +30,7 @@ showExpr = cata alg
         ProdF [] -> "1"
         ProdF [x] -> x
         ProdF xs -> "(" ++ intercalate " * " xs ++ ")"
+        PolyF _ -> "<poly>"
 
 -- | Math notation with named variables.
 showExprWithVars :: [String] -> Fix ExprF -> String
@@ -47,6 +48,7 @@ showExprWithVars varnames = cata alg
         ProdF [] -> "1"
         ProdF [x] -> x
         ProdF xs -> "(" ++ intercalate " * " xs ++ ")"
+        PolyF _ -> "<poly>"
 
 -- | NumPy notation.
 showPython :: Fix ExprF -> String
@@ -65,6 +67,7 @@ showPython = cata alg
         ProdF [] -> "1"
         ProdF [x] -> x
         ProdF xs -> "(" ++ intercalate " * " xs ++ ")"
+        PolyF _ -> "<poly>"
 
     pyFun Neg = "-"
     pyFun Abs = "np.abs"
@@ -98,6 +101,7 @@ showLatex = cata alg
         ProdF [] -> "1"
         ProdF [x] -> x
         ProdF xs -> "\\left(" ++ intercalate " \\cdot " xs ++ "\\right)"
+        PolyF _ -> "<poly>"
 
 -- | LaTeX notation with named variables.
 showLatexWithVars :: [String] -> Fix ExprF -> String
@@ -120,6 +124,7 @@ showLatexWithVars varnames = cata alg
         ProdF [] -> "1"
         ProdF [x] -> x
         ProdF xs -> "\\left(" ++ intercalate " \\cdot " xs ++ "\\right)"
+        PolyF _ -> "<poly>"
 
 showBinOp :: BinOp -> String
 showBinOp = \case

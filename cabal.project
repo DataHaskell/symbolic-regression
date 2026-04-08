@@ -1,10 +1,10 @@
 packages: .
 
--- hegg fork with normalizeNode, addWithNorm, runEqualitySaturationN, reachable extraction
+-- hegg fork with normalizeNode, addWithNorm, runEqualitySaturationN, reachable extraction, PolyMap
 source-repository-package
     type: git
     location: https://github.com/mchav/hegg
-    tag: e494e8ed91fe05ed52b46f5de0adfbefaf3ab470
+    tag: 9019cce914eac9d9c624a82cd6c721046a749386
 
 allow-newer: table-layout:*, haskeline:*, aeson:*,mwc-random:*
 allow-older: base

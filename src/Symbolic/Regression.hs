@@ -57,6 +57,13 @@ module Symbolic.Regression (
     RegressionConfig (..),
     ValidationConfig (..),
     defaultRegressionConfig,
+
+    -- * Boosting API
+    fitBoosted',
+    boostAndSimplify,
+
+    -- * Conversion
+    toExpr,
 ) where
 
 import Control.Exception (throw)
@@ -69,6 +76,7 @@ import qualified DataFrame as D
 import qualified DataFrame.Functions as F
 import DataFrame.Internal.Expression
 import DataFrame.Operations.Core (columnAsUnboxedVector)
+import qualified Symbolic.Regression.Boosting as Boosting
 import System.Random
 
 import Control.Monad (
@@ -486,6 +494,40 @@ fit g cfg targetColumn df =
             )
             (evalStateT alg g)
 
+{- | Run symbolic boosting on a DataFrame, returning the full BoostResult
+with all metrics (R², MSE, terms, distilled expressions).
+-}
+fitBoosted' ::
+    StdGen ->
+    Boosting.BoostConfig ->
+    D.Expr Double ->
+    D.DataFrame ->
+    IO Boosting.BoostResult
+fitBoosted' g cfg targetColumn df = do
+    let fm = toFeatureMatrix targetColumn
+        tgt = either throw id (columnAsUnboxedVector targetColumn df)
+        xTrain = fm df
+        trainData = (xTrain, tgt)
+    Boosting.fitBoosted g cfg trainData trainData
+
+{- | Run symbolic boosting on a DataFrame, returning just the simplified
+DataFrame expressions (same return type as 'fit').
+-}
+boostAndSimplify ::
+    StdGen ->
+    Boosting.BoostConfig ->
+    D.Expr Double ->
+    D.DataFrame ->
+    IO [D.Expr Double]
+boostAndSimplify g cfg targetColumn df = do
+    let cols = doubleFeatureCols targetColumn df
+    result <- fitBoosted' g cfg targetColumn df
+    let distilled = Boosting.brDistilled result
+        exprs = case distilled of
+            [] -> [toExpr cols (Boosting.brEnsembleExpr result)]
+            ds -> map (toExpr cols) ds
+    pure exprs
+
 -- | Convert a unary ExprF operation to the equivalent DataFrame expression.
 toExprUni :: [T.Text] -> UnOp -> Fix ExprF -> Expr Double
 toExprUni cols Sq v = F.pow (toExpr cols v) 2
@@ -518,6 +560,7 @@ toExpr _ (Fix (SumF [])) = Lit 0
 toExpr cols (Fix (SumF xs)) = sum (map (toExpr cols) xs)
 toExpr _ (Fix (ProdF [])) = Lit 1
 toExpr cols (Fix (ProdF xs)) = product (map (toExpr cols) xs)
+toExpr _ (Fix (PolyF _)) = Lit 0
 
 -- | Map a DataFrame expression node to its e-graph non-terminal name (e.g. "add", "square").
 toNonTerminal :: D.Expr Double -> String

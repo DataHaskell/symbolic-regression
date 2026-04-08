@@ -31,6 +31,7 @@ evalTree xss theta = go
         SumF (x : xs) -> foldl' (\(!acc) t -> VU.zipWith (+) acc (go t)) (go x) xs
         ProdF [] -> VU.replicate nRows 1
         ProdF (x : xs) -> foldl' (\(!acc) t -> VU.zipWith (*) acc (go t)) (go x) xs
+        PolyF _ -> error "evalTree: PolyF should not appear outside e-graph"
 {-# INLINE evalTree #-}
 
 -- | Evaluate a binary operation (with safe division).

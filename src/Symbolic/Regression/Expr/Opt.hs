@@ -12,6 +12,7 @@ module Symbolic.Regression.Expr.Opt (
     nll,
     r2,
     minimizeNLL,
+    minimizeNLLRidge,
     fractionalBayesFactor,
 ) where
 
@@ -157,6 +158,7 @@ fwdTape xss theta = go
                     [] -> VU.replicate nR 1
                     _ -> foldl1' (VU.zipWith (*)) vals
              in TpProd vals out tapes
+        PolyF _ -> error "fwdTape: PolyF not supported"
 {-# INLINE fwdTape #-}
 
 {- | Backward pass on tape: propagate adjoint, accumulate into mutable grad.
@@ -269,6 +271,52 @@ minimizeNLL _dist _mYerr maxIter xss ys tree theta0
             (!tOptS, !cost, !nEvals) = minimizeTNEWTON maxIter nP objGrad t0s
             !tOpt = vuFromStorable tOptS
             -- Use returned cost if valid, otherwise recompute
+            !finalCost =
+                if isNaN cost || isInfinite cost
+                    then mse ys (evalTree xss tOpt tree)
+                    else cost
+         in (tOpt, finalCost, nEvals)
+
+{- | Like 'minimizeNLL' but with an L2 (ridge) penalty on the parameters.
+
+The objective becomes @MSE + rho * sum(theta_i^2)@ which remains smooth,
+so TNEWTON handles it without issue.  Used by the boosting module for
+periodic joint coefficient refit.
+-}
+minimizeNLLRidge ::
+    Double ->
+    Int ->
+    Features ->
+    PVector ->
+    Fix ExprF ->
+    PVector ->
+    (PVector, Double, Int)
+minimizeNLLRidge rho maxIter xss ys tree theta0
+    | maxIter == 0 || VU.null theta0 =
+        (theta0, mse ys (evalTree xss theta0 tree), 0)
+    | otherwise =
+        let !nP = VU.length theta0
+            !nRf = fromIntegral (V.length xss) :: Double
+
+            objGrad :: VS.Vector Double -> (Double, VS.Vector Double)
+            objGrad thetaS =
+                let !theta = vuFromStorable thetaS
+                    !tape = fwdTape xss theta tree
+                    !yHat = tpOut tape
+                    !mseLoss = VU.sum (VU.zipWith (\h y -> let d = h - y in d * d) yHat ys) / nRf
+                    !ridgeLoss = rho * VU.sum (VU.map (\t -> t * t) theta)
+                    !loss = mseLoss + ridgeLoss
+                    !rootAdj = VU.zipWith (\h y -> 2 * (h - y) / nRf) yHat ys
+                    !mseGrad = runST $ do
+                        g <- VUM.replicate nP (0 :: Double)
+                        bwdTape tape rootAdj g
+                        VU.freeze g
+                    !grad = VU.zipWith (\gi ti -> gi + 2 * rho * ti) mseGrad theta
+                 in (loss, vsFromUnboxed grad)
+
+            !t0s = vsFromUnboxed theta0
+            (!tOptS, !cost, !nEvals) = minimizeTNEWTON maxIter nP objGrad t0s
+            !tOpt = vuFromStorable tOptS
             !finalCost =
                 if isNaN cost || isInfinite cost
                     then mse ys (evalTree xss tOpt tree)

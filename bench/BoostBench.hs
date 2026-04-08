@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -5,10 +6,16 @@ module Main where
 import Control.Exception (SomeException, evaluate, try)
 import Data.List (isPrefixOf, sort)
 import Data.Maybe (catMaybes)
+import qualified Data.Text as T
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
+import qualified Data.Vector as V
+import qualified Data.Vector.Unboxed as VU
 import qualified DataFrame as D
 import qualified DataFrame.Functions as F
-import Symbolic.Regression
+import DataFrame.Operations.Core (columnAsUnboxedVector)
+import Symbolic.Regression.Boosting
+import Symbolic.Regression.Expr (Features, PVector)
+import Symbolic.Regression.Expr.Print (showExprWithVars)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (getArgs)
 import System.IO (IOMode (..), hFlush, hPutStrLn, stdout, withFile)
@@ -23,16 +30,6 @@ feynmanOpts =
         , D.columnSeparator = ' '
         }
 
-benchConfig :: Int -> Int -> Int -> Bool -> Bool -> RegressionConfig
-benchConfig gens pop maxSz useEGraph _useMultiset =
-    defaultRegressionConfig
-        { generations = gens
-        , populationSize = pop
-        , maxExpressionSize = maxSz
-        , simplifyExpressions = useEGraph
-        , showTrace = False
-        }
-
 readSubsampled :: Int -> FilePath -> FilePath -> IO D.DataFrame
 readSubsampled nRows src dst = do
     callCommand $
@@ -45,74 +42,86 @@ readSubsampled nRows src dst = do
             ++ "'"
     D.readSeparated feynmanOpts dst
 
-computeR2 :: [Double] -> [Double] -> Double
-computeR2 actual predicted =
-    let n = fromIntegral (length actual) :: Double
-        mean_y = sum actual / n
-        ss_tot = sum [(y - mean_y) ^ (2 :: Int) | y <- actual]
-        ss_res = sum [(y - yp) ^ (2 :: Int) | (y, yp) <- zip actual predicted]
-     in if ss_tot == 0 then 1.0 else 1.0 - ss_res / ss_tot
+-- | Extract feature matrix and target vector from a DataFrame.
+dfToDataSet :: D.DataFrame -> T.Text -> (Features, PVector)
+dfToDataSet df targetCol =
+    let cols = D.columnNames df
+        featureCols = filter (/= targetCol) cols
+        nRows = D.nRows df
+        mkCol c = case columnAsUnboxedVector (F.col c) df of
+            Right v -> v
+            Left _ -> VU.replicate nRows 0.0
+        colVecs = map mkCol featureCols
+        nFeats = length featureCols
+        xss =
+            V.fromListN nRows $
+                [ VU.fromListN nFeats [colVecs !! f `VU.unsafeIndex` r | f <- [0 .. nFeats - 1]]
+                | r <- [0 .. nRows - 1]
+                ]
+        yTarget = mkCol targetCol
+     in (xss, yTarget)
 
 data Result = Result
     { rName :: String
     , rNVars :: Int
-    , rNModels :: Int
+    , rNTerms :: Int
     , rTime :: Double
     , rR2 :: Double
     , rFormula :: String
     }
     deriving (Show)
 
-runOne ::
-    Int ->
-    Int ->
-    Int ->
-    Int ->
-    Bool ->
-    Bool ->
-    FilePath ->
-    FilePath ->
-    IO Result
-runOne gens pop maxSz seed useEGraph useMultiset src tmp = do
+runOne :: Options -> FilePath -> FilePath -> IO Result
+runOne opts src tmp = do
     df <- readSubsampled 500 src tmp
     let cols = D.columnNames df
         nVars = length cols - 1
         target = last cols
-        cfg = benchConfig gens pop maxSz useEGraph useMultiset
+        (xTrain, yTrain) = dfToDataSet df target
+        trainData = (xTrain, yTrain)
+        valData = (xTrain, yTrain)
+        cfg =
+            defaultBoostConfig
+                { bcRounds = optRounds opts
+                , bcMaxWeakLearnerSize = optMaxSize opts
+                , bcCandidatesPerRound = optCandidates opts
+                , bcNloptIters = optNloptIters opts
+                , bcLearningRate = optLearningRate opts
+                , bcShowTrace = False
+                }
     t0 <- getCurrentTime
-    models <- fit (mkStdGen seed) cfg (F.col target) df
+    result <- fitBoosted (mkStdGen (optSeed opts)) cfg trainData valData
     t1 <- getCurrentTime
     let elapsed = realToFrac (diffUTCTime t1 t0) :: Double
-        best = last models -- most complex = best fit
-        predicted = D.columnAsList best (D.derive "pred" best df)
-        actual = D.columnAsList (F.col target) df
-        r2 = computeR2 actual predicted
-        formula = D.prettyPrint best
-    _ <- evaluate r2 -- force
-    return $ Result "" nVars (length models) elapsed r2 formula
+        nTerms = length (brTerms result)
+        featureNames = ["x" ++ show i | i <- [0 :: Int .. nVars - 1]]
+        formula = case brDistilled result of
+            (d : _) -> showExprWithVars featureNames d
+            [] -> showExprWithVars featureNames (brEnsembleExpr result)
+        trainMSE = brTrainMSE result
+        yMean = VU.sum yTrain / fromIntegral (VU.length yTrain)
+        ssTot = VU.sum (VU.map (\y -> (y - yMean) ** 2) yTrain)
+        r2 =
+            if ssTot == 0
+                then 1.0
+                else 1.0 - trainMSE * fromIntegral (VU.length yTrain) / ssTot
+    _ <- evaluate r2
+    return $ Result "" nVars nTerms elapsed r2 formula
 
-writeMarkdown ::
-    FilePath -> Int -> Int -> Int -> Int -> Int -> [Result] -> Double -> IO ()
-writeMarkdown path rows gens pop maxSz seed results totalTime =
+writeMarkdown :: FilePath -> Int -> Int -> Int -> [Result] -> Double -> IO ()
+writeMarkdown path rows rounds seed results totalTime =
     withFile path WriteMode $ \h -> do
-        hPutStrLn h "# Feynman Benchmark Results"
+        hPutStrLn h "# Boost Benchmark Results"
         hPutStrLn h ""
-        hPrintf
-            h
-            "**Config:** %d generations, %d population, max size %d, seed %d, %d rows/dataset\n"
-            gens
-            pop
-            maxSz
-            seed
-            rows
+        hPrintf h "**Config:** %d rounds, seed %d, %d rows/dataset\n" rounds seed rows
         hPrintf
             h
             "**Total time:** %.1fs | **Avg:** %.2fs/problem\n"
             totalTime
             (totalTime / fromIntegral (length results))
         hPutStrLn h ""
-        hPutStrLn h "| # | Dataset | Vars | Models | R² | Time (s) | Best Formula |"
-        hPutStrLn h "|---|---------|------|--------|----|----------|--------------|"
+        hPutStrLn h "| # | Dataset | Vars | Terms | R² | Time (s) | Formula |"
+        hPutStrLn h "|---|---------|------|-------|----|----------|---------|"
         mapM_
             ( \(i, r) ->
                 hPrintf
@@ -121,7 +130,7 @@ writeMarkdown path rows gens pop maxSz seed results totalTime =
                     (i :: Int)
                     (rName r)
                     (rNVars r)
-                    (rNModels r)
+                    (rNTerms r)
                     (rR2 r)
                     (rTime r)
                     (rFormula r)
@@ -137,37 +146,16 @@ writeMarkdown path rows gens pop maxSz seed results totalTime =
         hPrintf h "- R² >= 0.90: **%d** / %d\n" (goodR2 + okR2) (length results)
         hPrintf h "- R² < 0.90: **%d** / %d\n" poorR2 (length results)
 
-writeTsv :: FilePath -> [Result] -> IO ()
-writeTsv path results =
-    withFile path WriteMode $ \h -> do
-        hPutStrLn h "dataset\tvars\tmodels\tr2\ttime_seconds\tformula"
-        mapM_
-            ( \r ->
-                hPrintf
-                    h
-                    "%s\t%d\t%d\t%.10f\t%.10f\t%s\n"
-                    (rName r)
-                    (rNVars r)
-                    (rNModels r)
-                    (rR2 r)
-                    (rTime r)
-                    (sanitize (rFormula r))
-            )
-            results
-  where
-    sanitize = map (\c -> if c == '\t' || c == '\n' || c == '\r' then ' ' else c)
-
 data Options = Options
     { optPath :: FilePath
     , optRows :: Int
-    , optGens :: Int
-    , optPop :: Int
-    , optMaxSz :: Int
+    , optRounds :: Int
     , optSeed :: Int
-    , optUseEGraph :: Bool
-    , optUseMultiset :: Bool
+    , optMaxSize :: Int
+    , optCandidates :: Int
+    , optNloptIters :: Int
+    , optLearningRate :: Double
     , optMarkdownOut :: FilePath
-    , optTsvOut :: Maybe FilePath
     }
 
 defaultOptions :: FilePath -> Options
@@ -175,45 +163,35 @@ defaultOptions path =
     Options
         { optPath = path
         , optRows = 500
-        , optGens = 50
-        , optPop = 100
-        , optMaxSz = 7
+        , optRounds = 200
         , optSeed = 42
-        , optUseEGraph = True
-        , optUseMultiset = True
-        , optMarkdownOut = "bench/feynman_results.md"
-        , optTsvOut = Nothing
+        , optMaxSize = 7
+        , optCandidates = 50
+        , optNloptIters = 30
+        , optLearningRate = 0.1
+        , optMarkdownOut = "bench/boost_results.md"
         }
 
 usage :: String
 usage =
-    "Usage: feynman-bench <feynman_dir_or_file> [gens pop maxsz seed] "
-        ++ "[--rows N] [--markdown-out FILE] [--tsv-out FILE] [--no-egraph] [--no-multiset]"
+    "Usage: boost-bench <feynman_dir_or_file> [--rounds N] [--rows N] [--seed N] "
+        ++ "[--maxsize N] [--candidates N] [--nlopt-iters N] [--lr F] [--markdown-out FILE]"
 
 parseArgs :: [String] -> Options
 parseArgs args = case args of
     [] -> error usage
-    (path : rest) -> finish (go (defaultOptions path, []) rest)
+    (path : rest) -> go (defaultOptions path) rest
   where
-    go acc [] = acc
-    go (opts, pos) ("--no-egraph" : xs) = go (opts{optUseEGraph = False}, pos) xs
-    go (opts, pos) ("--no-multiset" : xs) = go (opts{optUseMultiset = False}, pos) xs
-    go (opts, pos) ("--rows" : n : xs) = go (opts{optRows = read n}, pos) xs
-    go (opts, pos) ("--markdown-out" : file : xs) = go (opts{optMarkdownOut = file}, pos) xs
-    go (opts, pos) ("--tsv-out" : file : xs) = go (opts{optTsvOut = Just file}, pos) xs
-    go (opts, pos) (x : xs)
-        | take 2 x == "--" = error usage
-        | otherwise = go (opts, pos ++ [x]) xs
-
-    finish (opts, []) = opts
-    finish (opts, [g, p, m, s]) =
-        opts
-            { optGens = read g
-            , optPop = read p
-            , optMaxSz = read m
-            , optSeed = read s
-            }
-    finish _ = error usage
+    go opts [] = opts
+    go opts ("--rounds" : n : xs) = go opts{optRounds = read n} xs
+    go opts ("--rows" : n : xs) = go opts{optRows = read n} xs
+    go opts ("--seed" : n : xs) = go opts{optSeed = read n} xs
+    go opts ("--maxsize" : n : xs) = go opts{optMaxSize = read n} xs
+    go opts ("--candidates" : n : xs) = go opts{optCandidates = read n} xs
+    go opts ("--nlopt-iters" : n : xs) = go opts{optNloptIters = read n} xs
+    go opts ("--lr" : n : xs) = go opts{optLearningRate = read n} xs
+    go opts ("--markdown-out" : file : xs) = go opts{optMarkdownOut = file} xs
+    go _ _ = error usage
 
 resolveInputs :: FilePath -> IO [(String, FilePath)]
 resolveInputs path = do
@@ -231,13 +209,13 @@ main = do
     opts <- parseArgs <$> getArgs
     inputs <- resolveInputs (optPath opts)
     let nFiles = length inputs
-        tmp = "/tmp/sr_feynman_tmp.dat"
+        tmp = "/tmp/sr_boost_bench_tmp.dat"
 
     printf
         "%-20s %5s %6s %8s %8s\n"
         ("Dataset" :: String)
         ("Vars" :: String)
-        ("Mod" :: String)
+        ("Terms" :: String)
         ("R²" :: String)
         ("Time" :: String)
     printf "%s\n" (replicate 52 '-')
@@ -249,12 +227,7 @@ main = do
                 result <-
                     try
                         ( runOne
-                            (optGens opts)
-                            (optPop opts)
-                            (optMaxSz opts)
-                            (optSeed opts)
-                            (optUseEGraph opts)
-                            (optUseMultiset opts)
+                            opts
                             path
                             tmp
                         ) ::
@@ -266,7 +239,7 @@ main = do
                             "%-20s %5d %6d %8.4f %7.2fs  [%d/%d]\n"
                             name
                             (rNVars r')
-                            (rNModels r')
+                            (rNTerms r')
                             (rR2 r')
                             (rTime r')
                             i
@@ -296,13 +269,10 @@ main = do
     writeMarkdown
         (optMarkdownOut opts)
         (optRows opts)
-        (optGens opts)
-        (optPop opts)
-        (optMaxSz opts)
+        (optRounds opts)
         (optSeed opts)
         good
         totalElapsed
-    maybe (pure ()) (`writeTsv` good) (optTsvOut opts)
     printf
         "\n%d/%d succeeded | total %.1fs | avg %.2fs/problem\n"
         (length good)

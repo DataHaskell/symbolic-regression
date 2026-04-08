@@ -13,7 +13,8 @@ module Symbolic.Regression.Expr (
     BinOp (..),
     UnOp (..),
 
-    -- * Re-exports from hegg
+    -- * Re-exports
+    PolyMap,
     Fix (..),
     cata,
 
@@ -27,6 +28,7 @@ module Symbolic.Regression.Expr (
     Features,
 ) where
 
+import Data.Equality.Graph.Poly (PolyMap)
 import Data.Equality.Utils (Fix (..), cata)
 import qualified Data.Vector as V
 import qualified Data.Vector.Unboxed as VU
@@ -53,6 +55,12 @@ data ExprF a
       SumF [a]
     | -- | AC multiplication: sorted list of factors
       ProdF [a]
+    | {- | Polynomial container: multiset of multisets.
+      Encodes a polynomial as a single e-node; distributivity is structural.
+      The ClassId keys inside PolyMap are NOT children in the Traversable sense;
+      congruence is maintained via exprNormalize / addWithNorm.
+      -}
+      PolyF !PolyMap
     deriving (Eq, Ord, Show, Functor, Foldable, Traversable)
 
 -- | Binary operations.

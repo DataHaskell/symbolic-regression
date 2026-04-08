@@ -33,6 +33,7 @@ countNodes = cata $ \case
     BinF _ l r -> 1 + l + r
     SumF xs -> 1 + sum xs
     ProdF xs -> 1 + sum xs
+    PolyF _ -> 1
 {-# INLINE countNodes #-}
 
 countParams :: Fix ExprF -> Int
@@ -82,6 +83,7 @@ relabelParams t = evalState (go t) 0
     go (Fix (BinF op l r)) = do l' <- go l; r' <- go r; pure (Fix (BinF op l' r'))
     go (Fix (SumF xs)) = Fix . SumF <$> mapM go xs
     go (Fix (ProdF xs)) = Fix . ProdF <$> mapM go xs
+    go (Fix (PolyF pm)) = pure (Fix (PolyF pm))
     go other = pure other
 
 -- | Relabel parameters by order of first occurrence (deduplicating).
@@ -117,6 +119,7 @@ paramsToConst theta =
             BinF op l r -> Fix (BinF op l r)
             SumF xs -> Fix (SumF xs)
             ProdF xs -> Fix (ProdF xs)
+            PolyF pm -> Fix (PolyF pm)
 
 -- | Convert all constants to parameters; return new tree and extracted values.
 constsToParam :: Fix ExprF -> (Fix ExprF, [Double])
@@ -129,6 +132,7 @@ constsToParam t = let (t', vs) = cata alg t in (relabelParams t', vs)
     alg (BinF op (l, vl) (r, vr)) = (Fix (BinF op l r), vl <> vr)
     alg (SumF xs) = let (ts, vs) = unzip xs in (Fix (SumF ts), concat vs)
     alg (ProdF xs) = let (ts, vs) = unzip xs in (Fix (ProdF ts), concat vs)
+    alg (PolyF pm) = (Fix (PolyF pm), [])
 
 ------------------------------------------------------------------------
 -- Node children

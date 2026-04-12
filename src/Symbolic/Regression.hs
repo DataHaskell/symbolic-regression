@@ -58,10 +58,6 @@ module Symbolic.Regression (
     ValidationConfig (..),
     defaultRegressionConfig,
 
-    -- * Boosting API
-    fitBoosted',
-    boostAndSimplify,
-
     -- * Conversion
     toExpr,
 ) where
@@ -76,7 +72,6 @@ import qualified DataFrame as D
 import qualified DataFrame.Functions as F
 import DataFrame.Internal.Expression
 import DataFrame.Operations.Core (columnAsUnboxedVector)
-import qualified Symbolic.Regression.Boosting as Boosting
 import System.Random
 
 import Control.Monad (
@@ -494,46 +489,12 @@ fit g cfg targetColumn df =
             )
             (evalStateT alg g)
 
-{- | Run symbolic boosting on a DataFrame, returning the full BoostResult
-with all metrics (R², MSE, terms, distilled expressions).
--}
-fitBoosted' ::
-    StdGen ->
-    Boosting.BoostConfig ->
-    D.Expr Double ->
-    D.DataFrame ->
-    IO Boosting.BoostResult
-fitBoosted' g cfg targetColumn df = do
-    let fm = toFeatureMatrix targetColumn
-        tgt = either throw id (columnAsUnboxedVector targetColumn df)
-        xTrain = fm df
-        trainData = (xTrain, tgt)
-    Boosting.fitBoosted g cfg trainData trainData
-
-{- | Run symbolic boosting on a DataFrame, returning just the simplified
-DataFrame expressions (same return type as 'fit').
--}
-boostAndSimplify ::
-    StdGen ->
-    Boosting.BoostConfig ->
-    D.Expr Double ->
-    D.DataFrame ->
-    IO [D.Expr Double]
-boostAndSimplify g cfg targetColumn df = do
-    let cols = doubleFeatureCols targetColumn df
-    result <- fitBoosted' g cfg targetColumn df
-    let distilled = Boosting.brDistilled result
-        exprs = case distilled of
-            [] -> [toExpr cols (Boosting.brEnsembleExpr result)]
-            ds -> map (toExpr cols) ds
-    pure exprs
-
 -- | Convert a unary ExprF operation to the equivalent DataFrame expression.
 toExprUni :: [T.Text] -> UnOp -> Fix ExprF -> Expr Double
 toExprUni cols Sq v = F.pow (toExpr cols v) 2
 toExprUni cols Cube v = F.pow (toExpr cols v) 3
 toExprUni cols Log v = log (toExpr cols v)
-toExprUni cols Recip v = F.lit 1 / toExpr cols v
+toExprUni cols Recip v = recip (toExpr cols v)
 toExprUni cols Sqrt v = sqrt (toExpr cols v)
 toExprUni cols Exp v = exp (toExpr cols v)
 toExprUni cols Sin v = sin (toExpr cols v)
@@ -557,9 +518,9 @@ toExpr _ (Fix (ParamF _)) = Lit 0 -- params should be substituted before calling
 toExpr cols (Fix (UnF f v)) = toExprUni cols f v
 toExpr cols (Fix (BinF op l r)) = toExprBin cols op l r
 toExpr _ (Fix (SumF [])) = Lit 0
-toExpr cols (Fix (SumF xs)) = sum (map (toExpr cols) xs)
+toExpr cols (Fix (SumF xs)) = foldl1 (+) (map (toExpr cols) xs)
 toExpr _ (Fix (ProdF [])) = Lit 1
-toExpr cols (Fix (ProdF xs)) = product (map (toExpr cols) xs)
+toExpr cols (Fix (ProdF xs)) = foldl1 (*) (map (toExpr cols) xs)
 toExpr _ (Fix (PolyF _)) = Lit 0
 
 -- | Map a DataFrame expression node to its e-graph non-terminal name (e.g. "add", "square").

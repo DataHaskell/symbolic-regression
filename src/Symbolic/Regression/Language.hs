@@ -37,6 +37,7 @@ import Data.Equality.Graph.Poly (
     canonicalizePoly,
     constPoly,
     mulPoly,
+    negatePoly,
     polySize,
     singletonPoly,
  )
@@ -95,6 +96,9 @@ exprNormalize node eg = case node of
     PolyF pm -> (PolyF (canonicalizePoly (`find` eg) pm), eg)
     other -> (normalizeNode other, eg)
 
+-- | Result of scanning an e-class for polynomial structure.
+data PolyLookup = GotPoly PolyMap | GotLit Double | GotNeg ClassId
+
 {- | Convert an e-class to its PolyMap representation.
   If the class contains a PolyF, use it directly.
   If it contains a LitF, use constPoly.
@@ -108,18 +112,20 @@ classToPolyMap cid eg =
             Just ec ->
                 -- Look for a PolyF first, then LitF, then fall back to singleton
                 let nodes = eClassNodes ec
-                    findPoly =
+                    findResult =
                         S.foldl'
                             ( \acc (Node n) -> case (acc, n) of
-                                (Nothing, PolyF pm) -> Just (Left pm)
-                                (Nothing, LitF v) -> Just (Right v)
+                                (Nothing, PolyF pm) -> Just (GotPoly pm)
+                                (Nothing, LitF v) -> Just (GotLit v)
+                                (Nothing, UnF Neg child) -> Just (GotNeg child)
                                 _ -> acc
                             )
                             Nothing
                             nodes
-                 in case findPoly of
-                        Just (Left pm) -> pm
-                        Just (Right v) -> constPoly v
+                 in case findResult of
+                        Just (GotPoly pm) -> pm
+                        Just (GotLit v) -> constPoly v
+                        Just (GotNeg child) -> negatePoly (classToPolyMap child eg)
                         Nothing -> singletonPoly cid'
 
 -- | Collect sum leaves: if the e-class contains a SumF, return its children; otherwise [cid].

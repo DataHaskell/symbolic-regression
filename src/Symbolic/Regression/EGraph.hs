@@ -124,7 +124,10 @@ polyToTree eg (Fix (PolyF pm)) =
             let expanded =
                     concatMap
                         ( \(cid, n) ->
-                            replicate n (polyToTree eg (extractBest eg srCost (find cid eg)))
+                            let e = polyToTree eg (extractBest eg srCost (find cid eg))
+                             in case n of
+                                    2 -> [Fix (UnF Sq e)]
+                                    _ -> replicate n e
                         )
                         (Map.toList atoms)
                 product_ = case expanded of

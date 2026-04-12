@@ -8,6 +8,9 @@ module Symbolic.Regression.Expr.Utils (
     countParams,
     countParamsUniq,
     countUniqueTokens,
+    treeDepth,
+    countOperators,
+    countConstants,
     relabelParams,
     relabelParamsOrder,
     paramsToConst,
@@ -69,6 +72,42 @@ countUniqueTokens = score . cata alg
     alg (BinF op l r) = (S.singleton op, mempty, mempty, mempty, mempty) <> l <> r
     alg (SumF xs) = (S.singleton Add, mempty, mempty, mempty, mempty) <> mconcat xs
     alg (ProdF xs) = (S.singleton Mul, mempty, mempty, mempty, mempty) <> mconcat xs
+
+-- | Maximum depth of the expression tree.
+treeDepth :: Fix ExprF -> Int
+treeDepth = cata $ \case
+    VarF _ -> 1
+    ParamF _ -> 1
+    LitF _ -> 1
+    UnF _ n -> 1 + n
+    BinF _ l r -> 1 + max l r
+    SumF xs -> 1 + maximum (0 : xs)
+    ProdF xs -> 1 + maximum (0 : xs)
+    PolyF _ -> 1
+{-# INLINE treeDepth #-}
+
+-- | Count the number of distinct operator types (binary + unary).
+countOperators :: Fix ExprF -> Int
+countOperators = score . cata alg
+  where
+    score (ops, fns) = S.size ops + S.size fns
+    alg (UnF f t) = (mempty, S.singleton f) <> t
+    alg (BinF op l r) = (S.singleton op, mempty) <> l <> r
+    alg (SumF xs) = (S.singleton Add, mempty) <> mconcat xs
+    alg (ProdF xs) = (S.singleton Mul, mempty) <> mconcat xs
+    alg _ = (mempty, mempty)
+{-# INLINE countOperators #-}
+
+-- | Count the number of numeric constants (LitF nodes).
+countConstants :: Fix ExprF -> Int
+countConstants = cata $ \case
+    LitF _ -> 1
+    UnF _ n -> n
+    BinF _ l r -> l + r
+    SumF xs -> sum xs
+    ProdF xs -> sum xs
+    _ -> 0
+{-# INLINE countConstants #-}
 
 ------------------------------------------------------------------------
 -- Parameter relabeling

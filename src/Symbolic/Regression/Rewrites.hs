@@ -97,13 +97,29 @@ algebraicRules =
     , pSq (pSqrt x) := x
     ]
 
+pSin, pCos :: Pattern ExprF -> Pattern ExprF
+pSin a = p (UnF Sin a)
+pCos a = p (UnF Cos a)
+
 functionRules :: [Rewrite SRAnalysis ExprF]
 functionRules =
     [ pLog (pExp x) := x
     , pExp (pLog x) := x
     , pLog (pMul x y) := pAdd (pLog x) (pLog y)
     , pLog (pPow x y) := pMul y (pLog x)
-    , pRecip (pRecip x) := x
-    , pSqrt (pSq x) := pAbs x
+    , -- Recip simplifications
+      pRecip (pRecip x) := x
+    , pDiv x (pRecip y) := pMul x y -- x / (1/y) → x*y
+    , pRecip (pMul x (pRecip y)) := pDiv y x -- 1/(x * 1/y) → y/x
+    , pMul x (pRecip x) := pLit 1 -- x * (1/x) → 1
+    , -- Even/odd symmetry
+      pCos (pNeg x) := pCos x -- cos(-x) → cos(x)
+    , pSin (pNeg x) := pNeg (pSin x) -- sin(-x) → -sin(x)
+    , pAbs (pNeg x) := pAbs x -- |−x| → |x|
+    , -- Neg simplifications
+      pNeg (pNeg x) := x -- −(−x) → x
+    , pMul (pNeg x) (pNeg y) := pMul x y -- (−x)(−y) → xy
+    , -- Root/power
+      pSqrt (pSq x) := pAbs x
     , pAbs (pMul x y) := pMul (pAbs x) (pAbs y)
     ]
